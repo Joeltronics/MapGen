@@ -1,0 +1,11 @@
+__pycache__
+.vscode
+*.pyc
+out
+data_cache
+*.jpg
+*.png
+*.csv
+*.act
+*.tiff
+*.TIFF
