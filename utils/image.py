@@ -42,11 +42,11 @@ def disable_pil_max_pixels(do_it: bool = True):
 
 
 def linear_to_gamma(im: np.ndarray, gamma=2.2) -> np.ndarray:
-	return np.power(im, gamma)
+	return np.power(im, 1.0/gamma)
 
 
 def gamma_to_linear(im: np.ndarray, gamma=2.2) -> np.ndarray:
-	return np.power(im, 1.0/gamma)
+	return np.power(im, gamma)
 
 
 def image_to_array(im, as_float=True) -> np.ndarray:
@@ -386,7 +386,6 @@ def sphere_gradient(
 
 
 def average_color(values: np.ndarray, /, *, median=False, luv_space=True) -> np.ndarray:
-# def average_color(values: np.ndarray, median=False, luv_space=True) -> np.ndarray:
 
 	if len(values) == 0:
 		return np.array([np.nan, np.nan, np.nan])

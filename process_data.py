@@ -482,8 +482,6 @@ def make_colormap(mask, temp, moisture, land_ocean_ice=None, quant_steps=DEFAULT
 				num_points[t, m] = this_num_points
 
 				if this_num_points != 0:
-					# TODO: modify average_color to take points in directly, instead of unstacked
-					# result[t, m, :] = average_color(points_r, points_g, points_b)
 					result[t, m, :] = average_color(points)
 
 				pbar.update()

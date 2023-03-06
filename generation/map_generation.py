@@ -31,7 +31,7 @@ TODO:
 
 
 PI: Final = np.pi
-DEFAULT_MAX_PRECIPITATION_CM = 400
+DEFAULT_PRECIPITATION_RANGE_CM = (0.5, 400)
 DEFAULT_TEMPERATURE_RANGE_C = (-10, 30)
 DEGREES_C_COLDER_PER_KM_ELEVATION = 7.5
 SEAWATER_FREEZING_POINT_C = -1.8
@@ -176,7 +176,7 @@ def to_image(
 
 	assert COLORMAP.shape == (COLORMAP_RESOLUTION, COLORMAP_RESOLUTION, 3)
 	colormap_temperature_idx = rescale(temperature_C, (0., 30.), (0., COLORMAP_RESOLUTION-1.), clip=True)
-	colormap_rainfall_idx = rescale(rainfall_cm, (0., DEFAULT_MAX_PRECIPITATION_CM), (0., COLORMAP_RESOLUTION-1.), clip=True)
+	colormap_rainfall_idx = rescale(rainfall_cm, DEFAULT_PRECIPITATION_RANGE_CM, (0., COLORMAP_RESOLUTION-1.), clip=True)
 	colormap_temperature_idx = np.floor(colormap_temperature_idx).astype(int)
 	colormap_rainfall_idx = np.floor(colormap_rainfall_idx).astype(int)
 
@@ -208,7 +208,7 @@ def biome_map(elevation_11: np.ndarray, temperature_C: np.ndarray, rainfall_cm: 
 		raise ValueError(f'Arrays do not have the same shape: {elevation_11.shape}, {temperature_C.shape}, {rainfall_cm.shape}')
 
 	temperature_01 = rescale(temperature_C, DEFAULT_TEMPERATURE_RANGE_C, (0., 1.), clip=True)
-	rainfall_01 = rescale(rainfall_cm, (0.0, DEFAULT_MAX_PRECIPITATION_CM), (0., 1.0), clip=True)
+	rainfall_01 = rescale(rainfall_cm, DEFAULT_PRECIPITATION_RANGE_CM, (0., 1.0), clip=True)
 
 	rainfall_quadrant = np.clip(np.floor(rainfall_01 * 4), 0, 3).astype(np.uint8)
 	temperature_quadrant = np.clip(np.floor(temperature_01 * 4), 0, 3).astype(np.uint8)
@@ -501,36 +501,6 @@ def make_latitude_map(width: int, height: int, latitude_range=(-90, 90), radians
 	return latitude
 
 
-def make_prevailing_wind(latitude_deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-
-	southern = (latitude_deg < 0)
-	abs_latitude_deg = np.abs(latitude_deg)
-
-	ret_x = np.zeros_like(latitude_deg)
-	ret_y = np.zeros_like(latitude_deg)
-
-	polar = abs_latitude_deg >= 60
-	ferrel = np.logical_and(abs_latitude_deg >= 30, np.logical_not(polar))
-	hadley = abs_latitude_deg < 30
-
-	ret_x[polar] = TODO
-	ret_y[polar] = TODO
-
-	ret_x[ferrel] = TODO
-	ret_y[ferrel] = TODO
-
-	ret_x[hadley] = TODO
-	ret_y[hadley] = TODO
-
-	ret_y[southern] = -ret_y[southern]
-
-	# TODO: should also scale this by where is ocean and where isn't
-	# - higher speed over ocean
-	# - higher speed at latitudes that are mostly ocean (e.g. southern hemisphere ocean has stronger winds than northern)
-
-	return ret_x, ret_y
-
-
 def scale_temperature(
 		latitude_deg: np.ndarray,
 		elevation_m: np.ndarray,
@@ -582,7 +552,7 @@ def scale_rainfall(
 		rainfall: np.ndarray,
 		latitude_deg: np.ndarray,
 		strength=0.75,
-		max_precipitation_cm=DEFAULT_MAX_PRECIPITATION_CM,
+		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
 	require_same_shape(rainfall, latitude_deg)
@@ -594,7 +564,7 @@ def scale_rainfall(
 	latitude_rainfall_map = latitude_rainfall_fn(latitude)
 	rainfall_01 = rainfall * (1.0 - strength) + latitude_rainfall_map * strength
 
-	rainfall_cm = rescale(rainfall_01, (0.0, 1.0), (0., max_precipitation_cm))
+	rainfall_cm = rescale(rainfall_01, (0.0, 1.0), precipitation_range_cm)
 	return rainfall_cm
 
 
@@ -706,7 +676,6 @@ def _generate(
 	# TODO: pass in fbm valley function as argument, for sphere noise
 	mountain_cells = _fbm('erosion_cells', valley=True, base_frequency=mountain_cell_base_frequency, octaves=valley_octaves)
 
-	# prevailing_wind = make_prevailing_wind(latitude_deg)
 	prevailing_wind = None  # TODO
 
 	tprint('Scaling elevation/temperature/rainfall')

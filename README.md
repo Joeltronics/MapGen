@@ -6,17 +6,19 @@ How to use:
 
 `main.py run`
 
-Then open a web browser to launch Gradio UI
+Then, open the printed URL (likely http://127.0.0.1:7860/) in a web browser to run the Gradio UI
+
+Right now, Python 3.10 is required - in theory this should would be compatible with 3.11 as well, but it requires Numba, which does not currently support 3.11.
 
 ## How does it work?
 
-Currently, the general algorithm is:
+The current general algorithm is:
 
 1. Generate elevation
-	- Currently based on fractal simplex noise
+	- Based on fractal simplex noise
 	- Scale depending on water amount
 2. Erode elevation map
-	- Currently based on more noise (valley noise), not a realistic model
+	- Based on more noise (valley noise), not a realistic model
 3. Calculate gradient from elevation
 4. Generate temperature map, based on latitude + elevation + noise
 5. Generate precipitation map, based on latitude + noise
@@ -52,13 +54,13 @@ Also improve noise-based options:
 
 **Why Python? Why not something more performant?**
 
-Python is fast. Not in terms of code performance, but in terms of writing code, and I wanted to get something up & running quickly.
-
-Sure, I'd love to write a full C++ GUI for this, with 3D rendering and everything. But that would take a lot more work (especially since UIs aren't an area of expertise of mine), and I'd rather focus on the core generation, at least for now.
+I'd love to write a C++ GUI for this, with 3D rendering and everything, and maybe even move a lot of the computation to the GPU.
+But that would be a lot more work, and I'd rather focus on the core generation for now.
 
 **Why the ugly pyopensimplex hacks?**
 
-pyopensimplex doesn't have an optimized method to generate from an arbitrary set of coordinates
+pyopensimplex doesn't have an optimized method to generate from an arbitrary set of coordinates.
+I've moved to pyfastnoisesimd wherever possible, but there are still a few use cases that need pyopensimplex (4D noise, for one).
 
 ## TODO
 
@@ -69,7 +71,10 @@ Other TODO items:
 ### UI features
 
 * More options for generating 2D "flat maps"
-* Option to zoom in on an area of an already-generated map
+	* Set width as well as height
+	* Specify latitude
+	* Options to specify what's on each side of the map (e.g. ocean, mountains, desert, etc)
+* Option to regenerate a region of a map at higher resolution
 * Better options for saving files
 
 ### Engine & Performance
@@ -77,8 +82,9 @@ Other TODO items:
 * Generate different views directly from data, instead of generating equirectangular projection and remapping
 * Some Gradio performance issues
 	* By default it base64 encodes images, which adds a lot of overhead when we have lots of large images
-	* Lots of possible ways to improve this - save to a file and link that instead; use a gradio Gallery object
+	* Lots of possible ways to improve this - save to a file and link that instead; or use gradio Gallery objects everywhere
 * Cache noise to reuse it
+	* e.g. if re-generating the same seed with a few different parameters or higher resolution
 * Use more pyfastnoisesimd features
 
 ### Known Bugs & Problems

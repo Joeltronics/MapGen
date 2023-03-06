@@ -838,13 +838,16 @@ def run(args):
 		args.color = args.topography = args.gradient = args.masks = args.vegetation = args.temperature = True
 
 	if args.color:
+		tprint('Processing color data...')
 		land_ocean_ice = get_land_ocean_ice(resize=False, as_img=False)
 		_imshow(land_ocean_ice, 'get_land_ocean_ice(resize=False)')
 		land_ocean_ice = get_land_ocean_ice(resize=True, as_img=False)
 		_imshow(land_ocean_ice, 'get_land_ocean_ice(resize=True)')
 		del land_ocean_ice
+		print()
 
 	if args.topography:
+		tprint('Processing topography & bathymetry data...')
 		elevation = get_elevation()
 		tprint('get_elevation() range: [%f, %f]' % data_range(elevation))
 		_imshow(elevation, 'get_elevation()')
@@ -865,8 +868,10 @@ def run(args):
 		tprint('get_topography() range: [%f, %f]' % data_range(topography))
 		_imshow(topography, 'get_topography()', cmap='gist_earth')
 		del topography
+		print()
 
 	if args.gradient:
+		tprint('Processing gradient...')
 		elevation = get_elevation()
 
 		gx, gy = sphere_gradient(elevation, scale01=False, latitude_adjust=True, sobel=False)
@@ -887,8 +892,10 @@ def run(args):
 		_show_gradient(elevation, gm, gx, gy, 'sphere_gradient(sobel=True, latitude_adjust=False)')
 
 		del elevation, gx, gy
+		print()
 
 	if args.masks:
+		tprint('Processing masks...')
 		mask = get_mask(land=True)
 		_imshow(mask, 'Land mask')
 		mask = get_mask(land=True, lakes=True)
@@ -900,8 +907,10 @@ def run(args):
 		mask = get_antarctica_greenland_mask()
 		_imshow(mask, 'Greenland + Antarctica mask')
 		del mask
+		print()
 
 	if args.vegetation:
+		tprint('Processing rain & vegetation...')
 		wv = get_average_wv()
 		tprint('get_average_wv() range: [%f, %f]' % data_range(wv))
 		_imshow(wv, 'get_average_wv()', cmap='YlGn', nan=(0, 0, 0))
@@ -919,8 +928,10 @@ def run(args):
 		tprint('get_average_rain() range: [%f, %f]' % data_range(rain))
 		_imshow(rain, 'get_average_rain()', cmap='YlGn', nan=(0, 0, 0))
 		del rain
+		print()
 
 	if args.temperature:
+		tprint('Processing temperature...')
 		average_temp = get_average_surface_temp(ocean=True)
 		_imshow(average_temp, 'get_average_surface_temp(all)', cmap='coolwarm', nan=(0, 0, 0))
 		average_temp = get_average_surface_temp(ocean=False)
@@ -932,7 +943,9 @@ def run(args):
 		average_temp = get_average_surface_temp(land_day=False, land_night=True)
 		_imshow(average_temp, 'get_average_surface_temp(land, night only)', cmap='coolwarm', nan=(0, 0, 0))
 		del average_temp
+		print()
 
+	tprint('Showing plots')
 	plt.show()
 
 
