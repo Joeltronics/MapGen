@@ -622,8 +622,8 @@ def plot_topography(elevation, bathymetry, topography, land_ocean_mask, args):
 	# TODO: gradient histogram
 
 
-def get_parser(add_help=True):
-	parser = argparse.ArgumentParser(add_help=add_help)
+def parse_args(args):
+	parser = argparse.ArgumentParser()
 
 	parser.add_argument('-q', dest='quantization', metavar='QUANTIZATION', type=int, default=DEFAULT_QUANTIZATION, help=f'Quantization lookup table steps, default {DEFAULT_QUANTIZATION}')
 	parser.add_argument('--no-save', dest='save', action='store_false', help="Don't save anything")
@@ -634,12 +634,7 @@ def get_parser(add_help=True):
 	g.add_argument('--hist-bins', default=DEFAULT_HIST_BINS, help=f'Histogram number of bins, default {DEFAULT_HIST_BINS}')
 	g.add_argument('--corr-smoothing', dest='smoothing', metavar='SMOOTHING', type=int, default=DEFAULT_SMOOTHING, help=f'Correlation plot smoothing, default {DEFAULT_SMOOTHING}')
 
-	return parser
-
-
-def parse_args():
-	parser = get_parser()
-	return parser.parse_args()
+	return parser.parse_args(args)
 
 
 def estimate_rainfall(land_mask, ocean_mask, temp, wv, veg, rain):
@@ -647,7 +642,9 @@ def estimate_rainfall(land_mask, ocean_mask, temp, wv, veg, rain):
 	return rain
 
 
-def run(args):
+def main(args=None):
+	args = parse_args(args)
+
 	start_time = tprint('Starting', is_start=True)
 
 	if False and args.show_plots:
@@ -825,11 +822,6 @@ def run(args):
 
 	tprint('Showing plots')
 	plt.show()
-
-
-def main():
-	args = parse_args()
-	run(args)
 
 
 if __name__ == "__main__":

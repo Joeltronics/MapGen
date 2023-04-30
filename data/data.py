@@ -768,8 +768,8 @@ def sat_vapor_density_from_temp(t):
 # 	pass  # TODO
 
 
-def get_parser(add_help=True):
-	parser = argparse.ArgumentParser(add_help=add_help)
+def parse_args(args=None) -> argparse.Namespace:
+	parser = argparse.ArgumentParser()
 
 	parser.add_argument('--recalculate', action='store_true', help="Recalculate averages instead of using cached (still keeps cached downloads)")
 
@@ -781,11 +781,7 @@ def get_parser(add_help=True):
 	g.add_argument('--veg',       action='store_true', dest='vegetation', help='Vegeation, water vapor, rainfall')
 	g.add_argument('--temp',      action='store_true', dest='temperature', help='Temperature')
 
-	return parser
-
-
-def parse_args() -> argparse.Namespace:
-	return get_parser().parse_args()
+	return parser.parse_args(args)
 
 
 def _imshow(im: np.ndarray, title='', *, cmap='gray', nan=None, **kwargs):
@@ -828,8 +824,10 @@ def _show_gradient(elevation, gmag, gx, gy, title=''):
 	plt.colorbar(imshow_result, ax=ax[1][1])
 
 
-def run(args):
+def main(args=None):
 	global _load_cached_averages
+
+	args = parse_args(args)
 
 	if args.recalculate:
 		_load_cached_averages = False
@@ -947,11 +945,6 @@ def run(args):
 
 	tprint('Showing plots')
 	plt.show()
-
-
-def main():
-	args = parse_args()
-	run(args)
 
 
 if __name__ == "__main__":

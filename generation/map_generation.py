@@ -1,26 +1,23 @@
 #!/usr/bin/env python
 
-import argparse
 from dataclasses import dataclass, field
 from enum import Enum, unique
 from pathlib import Path
 from typing import List, Optional, Tuple, Literal, Final
 
-import gradio as gr
-from matplotlib.backends.backend_agg import FigureCanvasAgg, FigureCanvas
+from matplotlib.backends.backend_agg import FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import pyplot as plt
-from matplotlib.colors import hsv_to_rgb, rgb_to_hsv, LightSource
+from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from PIL import Image
-from scipy.interpolate import LinearNDInterpolator
 
 from generation.fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
 from utils.image import float_to_uint8, gradient, sphere_gradient, linear_to_gamma, gamma_to_linear, remap
 from utils.map_projection import make_projection_map
 from utils.numeric import data_range, rescale, max_abs, require_same_shape
-from utils.utils import Parameter, tprint
+from utils.utils import tprint
 
 
 """
