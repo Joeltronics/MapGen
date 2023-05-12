@@ -2,34 +2,32 @@
 
 import colorsys
 from contextlib import contextmanager
-from os import PathLike
-from typing import Optional, Tuple, Union, Literal
+from math import ceil, isclose
+from numbers import Number
+from typing import Final, Optional, Tuple, Union, Literal
 import warnings
 
 import colour
 import numpy as np
+from matplotlib.backends.backend_agg import FigureCanvas
+from matplotlib.figure import Figure
 from matplotlib import pyplot as plt
-import scipy.signal
 from PIL import Image
+import scipy.ndimage
 
-from utils.numeric import rescale, rescale_in_place, data_range, max_abs
 import utils.numeric
+from utils.numeric import rescale, data_range, max_abs, magnitude, linspace_midpoint, require_same_shape
+
+from utils.consts import PI, TWOPI, EARTH_POLAR_CIRCUMFERENCE_M, EARTH_POLAR_CIRCUMFERENCE_KM, EARTH_EQUATORIAL_CIRCUMFERENCE_M
 
 
-PI = np.pi
-TWOPI = 2 * np.pi
+SHOW_IMG_USE_MATPLOTLIB: Final = False
 
-SHOW_IMG_USE_MATPLOTLIB = False
-
-GRADIENT_CORRECT_WRAPPING = True
-
-EARTH_POLAR_CIRCUMFERENCE_M = 40_007_863
-EARTH_EQUATORIAL_CIRCUMFERENCE_M = 40_075_017
-MIN_LATITUDE_ADJUST_CIRCUMFERENCE = EARTH_POLAR_CIRCUMFERENCE_M // 10
+GRADIENT_CORRECT_WRAPPING: Final = True
 
 
 @contextmanager
-def disable_pil_max_pixels(do_it: bool = True):
+def disable_pil_max_pixels(do_it: bool = True, /):
 	if not do_it:
 		yield None
 		return
@@ -161,228 +159,168 @@ def array_to_image(arr: np.ndarray, bipolar=False, mode=None, nan=None) -> Image
 	return Image.fromarray(arr_int, mode=mode)
 
 
-def resize_array(
+def nan_to_alpha(
 		arr: np.ndarray,
-		new_size: Tuple[int, int],
-		data_range: Optional[Tuple[float, float]] = None,
-		resampling=Image.BILINEAR,
-		verbose=False,
+		*,
+		nan_val: Optional[Number] = 0,
+		alpha_non_nan_val: Optional[Number] = None,
+		nan_mask: Optional[np.ndarray] = None,
 		) -> np.ndarray:
 	"""
-	:note: Loses a lot of data precision due to conversion to uint8!
+	Add an alpha channel, based on NaN values in array
+
+	:param arr: Array to convert. Currently must have 1 or 3 channels.
+	:param nan_val: Value to be used to fill NaN values in channels besides alpha.
+		If None, will leave NaN values in place.
+	:param alpha_non_nan_val: Value to be used for alpha channel for non-NaN values.
+		Defaults to 1.0 if arr.dtype is floating, or max of type otherwise.
+	:param nan_mask: Mask of NaN values in array, if already calculated.
+		Must be provided if arr.dtype is not floating.
+		Currently must be provided if arr has more than 1 channel.
 	"""
 
-	nan_mask = np.isnan(arr)
-	any_nan = nan_mask.any()
+	arr_is_float = np.issubdtype(arr.dtype, np.floating)
+	nan_mask_was_provided = (nan_mask is not None)
 
-	mode = None
-	num_channels = None
+	if (not arr_is_float) and (not nan_mask_was_provided):
+		raise ValueError('Must provide nan_mask if using with non-float types')
 
-	# TODO: get this working while keeping image as float, or even at least uint16
-	dtype = np.uint8
-	dtype_max_val = 255
+	if nan_mask is None:
+		nan_mask = np.isnan(arr)
 
-	if data_range is None:
-		data_range = utils.numeric.data_range(arr)
-	arr = np.floor(rescale(arr, range_in=data_range, range_out=(0., dtype_max_val))).astype(dtype)
-
-	if any_nan:
-		arr = np.nan_to_num(arr, nan=0.0)
-
-		if len(arr.shape) == 2:
-			arr = arr.reshape((arr.shape[0], arr.shape[1], 1))
-		num_channels = arr.shape[2]
-
-		# FIXME: this likely doesn't work properly if arr is RGB
-		alpha_channel = dtype_max_val * np.ones_like(arr)
-		alpha_channel[nan_mask] = 0
-		assert arr.shape[2] == num_channels
-		arr = np.stack((arr, alpha_channel), axis=2)
-		assert arr.shape[2] == num_channels + 1
-
-		if num_channels == 1:
-			mode = 'LA'
-		elif num_channels == 3:
-			mode = 'RGBA'
+	if len(nan_mask.shape) == 3:
+		if nan_mask_was_provided:
+			raise NotImplementedError('Multi-channel nan_mask not currently supported')
 		else:
-			raise ValueError(f'Cannot handle array with NaN and {num_channels} channels')
+			raise NotImplementedError('Multi-channel inputs are only supported if single-channel nan_mask is provided')
 
-		if verbose:
-			for channel in range(num_channels + 1):
-				print(f'Channel {channel}, range: {utils.numeric.data_range(arr[:, :, channel])}')
+	if nan_val is not None:
+		arr = np.nan_to_num(arr, nan=nan_val)
 
-	im = Image.fromarray(arr, mode=mode)
-	im = im.resize(new_size, resample=resampling)
-	arr = np.asarray(im, dtype=float)
+	if len(arr.shape) == 2:
+		arr = arr.reshape((arr.shape[0], arr.shape[1], 1))
+		assert len(arr.shape) == 3, f"{arr.shape=}"
+	elif len(arr.shape) != 3:
+		raise ValueError(f'arr must have 2 or 3 dimensions (shape={arr.shape})')
 
-	if any_nan:
-		assert num_channels is not None
+	num_channels_in = arr.shape[2]
+	num_channels_out = num_channels_in + 1
 
-		if verbose:
-			print(f'Image shape: {arr.shape}')
-			for channel in range(num_channels + 1):
-				print(f'Channel {channel}, range: {utils.numeric.data_range(arr[..., channel])}')
+	if alpha_non_nan_val is None:
+		alpha_non_nan_val = 1.0 if arr_is_float else np.iinfo(arr.dtype).max
 
-		alpha_channel_after = arr[..., -1]
-
-		alpha_thresh = 1
-		alpha_mask_after = alpha_channel_after < alpha_thresh
-		assert alpha_mask_after.any()  # TODO: remove this assertion later
-		assert not alpha_mask_after.all()  # TODO: remove this assertion later
-
-		arr = arr[..., :-1]
-		assert arr.shape[2] == num_channels
-
-		for channel in range(num_channels):
-			arr[..., channel][alpha_mask_after] = np.nan
-
-		if num_channels == 1:
-			arr = arr.reshape((arr.shape[0], arr.shape[1]))
-
-	rescale_in_place(arr, range_in=(0., dtype_max_val), range_out=data_range)
+	alpha_channel = np.full_like(arr, alpha_non_nan_val)
+	alpha_channel[nan_mask] = 0
+	assert len(arr.shape) == 3 and arr.shape[2] == num_channels_in, f"{arr.shape=}"
+	arr = np.concatenate((arr, alpha_channel), axis=2)
+	assert len(arr.shape) == 3 and arr.shape[2] == num_channels_out, f"{arr.shape=}"
 
 	return arr
 
 
-def _pad_sphere_image_for_convolution(im: np.ndarray, large_sobel: bool) -> np.ndarray:
-	height, width = im.shape
+def alpha_to_nan(arr: np.ndarray, *, nan_thresh: Number = 0) -> np.ndarray:
 
-	first_col = im[:, :1]
-	last_col = im[:, -1:]
-	if large_sobel:
-		im = np.concatenate((last_col, last_col, im, first_col, first_col), axis=1)
-		assert im.shape == (height, width + 4)
-	else:
-		im = np.concatenate((last_col, im, first_col), axis=1)
-		assert im.shape == (height, width + 2)
+	if (len(arr.shape) != 3) or (arr.shape[2] == 1):
+		raise ValueError(f'arr does not have alpha channel (shape={arr.shape})')
 
-	first_row = im[:1, :]
-	last_row = im[-1:, :]
-	if large_sobel:
-		im = np.concatenate((first_row, first_row, im, last_row, last_row), axis=0)
-		assert im.shape == (height + 4, width + 4)
-	else:
-		im = np.concatenate((first_row, im, last_row), axis=0)
-		assert im.shape == (height + 2, width + 2)
-	
-	return im
+	num_channels_in = arr.shape[-1]
+	num_channels_out = num_channels_in - 1
 
+	alpha_channel = arr[..., -1]
+	nan_mask = alpha_channel <= nan_thresh
 
-def gradient(
-		im: np.ndarray, /,
-		scale01=False, magnitude=False, sobel=True, large_sobel=False,
-		) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+	arr = arr[..., :-1]
+	assert arr.shape[2] == num_channels_out
 
-	height, width = im.shape
+	for channel in range(num_channels_out):
+		arr[..., channel][nan_mask] = np.nan
 
-	if large_sobel:
-		gx = np.array([
-			[1, 2, 0, -2, -1],
-			[4, 8, 0, -8, -4],
-			[6, 12, 0, -12, -6],
-			[4, 8, 0, -8, -4],
-			[1, 2, 0, -2, -1]])
-	elif sobel:
-		gx = np.array([
-			[1, 0, -1],
-			[2, 0, -2],
-			[1, 0, -1]])
-	else:
-		gx = np.array([[1, 0, -1]])
+	if num_channels_out == 1:
+		arr = arr.reshape((arr.shape[0], arr.shape[1]))
 
-	kernel_magnitude = np.sum(np.abs(gx))
-	gx = gx / kernel_magnitude
-
-	gy = np.transpose(gx)
-
-	gradient_x = scipy.signal.convolve2d(im, gx, mode='same')
-	gradient_y = scipy.signal.convolve2d(im, gy, mode='same')
-
-	assert gradient_x.shape == gradient_y.shape == (height, width)
-
-	if magnitude:
-		gradient_mag = np.sqrt(np.square(gradient_x), np.square(gradient_y))
-		if scale01:
-			gradient_mag = rescale(gradient_mag, data_range(gradient_mag), (0., 1.))
-		return gradient_mag
-	else:
-		if scale01:
-			max_abs_gradient = max(np.amax(gradient_x), np.amax(gradient_y))
-			gradient_x = rescale(gradient_x, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
-			gradient_y = rescale(gradient_y, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
-		return gradient_x, gradient_y
+	return arr
 
 
-def sphere_gradient(
-		im: np.ndarray, /,
-		scale01=False, magnitude=False, latitude_adjust=True, sobel=True, large_sobel=False,
-		) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+def resize_array(
+		arr: np.ndarray,
+		new_size: Tuple[int, int],
+		data_range: Optional[Tuple[float, float]] = None,
+		resampling = Image.BILINEAR,
+		# wrap_x = False,  # TODO: get this working
+		# wrap_y = False,  # TODO: get this working
+		internal_dtype = np.int32,
+		verbose = False,
+		) -> np.ndarray:
+	"""
+	:param new_size: in image dimensions, i.e. (width, height)
 
-	height, width = im.shape
-	assert width == 2 * height
+	:note: Loses some data precision due to conversion to int32!
+	"""
 
-	if large_sobel:
-		gx = np.array([
-			[1, 2, 0, -2, -1],
-			[4, 8, 0, -8, -4],
-			[6, 12, 0, -12, -6],
-			[4, 8, 0, -8, -4],
-			[1, 2, 0, -2, -1]])
-	elif sobel:
-		gx = np.array([
-			[1, 0, -1],
-			[2, 0, -2],
-			[1, 0, -1]])
-	else:
-		gx = np.array([[1, 0, -1]])
+	if len(arr.shape) not in [2, 3]:
+		raise ValueError(f'Array must have 2 or 3 dimensions (shape={arr.shape})')
 
-	kernel_magnitude = np.sum(np.abs(gx))
-	gy = np.transpose(gx)
+	nan_mask = np.isnan(arr)
+	any_nan = nan_mask.any()
 
-	# Want to wrap image in X dimension, but not in Y (only matters for Sobel, not for 1D)
-	if GRADIENT_CORRECT_WRAPPING and (sobel or large_sobel):
-		im = _pad_sphere_image_for_convolution(im, large_sobel=large_sobel)
-		assert im.shape == (height + 4, width + 4) if large_sobel else (height + 2, width + 2)
-		gradient_x = scipy.signal.convolve2d(im, gx, mode='valid')
-		gradient_y = scipy.signal.convolve2d(im, gy, mode='valid')
-	else:
-		gradient_x = scipy.signal.convolve2d(im, gx, mode='same', boundary='wrap')
-		gradient_y = scipy.signal.convolve2d(im, gy, mode='same', boundary='symm')
+	dtype_min_val = np.iinfo(internal_dtype).min
+	dtype_max_val = np.iinfo(internal_dtype).max
 
-	# Y gradient is easy since we're using equirectangular projection so y step size is constant
-	dy = EARTH_POLAR_CIRCUMFERENCE_M / (2 * height)
-	gradient_y /= (kernel_magnitude * dy)
+	if data_range is None:
+		data_range = utils.numeric.data_range(arr)
+	arr = np.floor(rescale(arr, range_in=data_range, range_out=(dtype_min_val, dtype_max_val))).astype(internal_dtype)
 
-	if not latitude_adjust:
-		dx = dy
-		gradient_x /= (kernel_magnitude * dx)
-	else:
-		latitude_radians, latitude_step = np.linspace(start=-PI/2, stop=PI/2, num=height, endpoint=False, retstep=True)
-		latitude_radians += 0.5*latitude_step
-		circumference_at_latitude = EARTH_EQUATORIAL_CIRCUMFERENCE_M * np.cos(latitude_radians)
-		assert np.amin(circumference_at_latitude) > 0
-		circumference_at_latitude_clipped = np.maximum(circumference_at_latitude, MIN_LATITUDE_ADJUST_CIRCUMFERENCE)
+	mode = None
+	if any_nan:
+		arr = nan_to_alpha(arr, nan_val=0.0, nan_mask=nan_mask)
+		assert len(arr.shape) == 3
 
-		dx = circumference_at_latitude_clipped / width
+		if verbose:
+			for channel in range(arr.shape[2]):
+				print(f'Channel {channel}, range: {utils.numeric.data_range(arr[:, :, channel])}')
 
-		dx = np.tile(dx.reshape((height, 1)), (1, width))
-		assert dx.shape == gradient_x.shape == (height, width), f"{gradient_x.shape=}, {dx.shape=}"
+		if arr.shape[2] == 2:
+			mode = 'LA'
+		elif arr.shape[2] == 4:
+			mode = 'RGBA'
+		else:
+			raise NotImplementedError(f'Cannot handle array with {arr.shape[-1] - 1} channels with NaN values (shape={arr.shape})')
 
-		gradient_x /= (kernel_magnitude * dx)
+	new_size = list(new_size)
 
-	assert gradient_x.shape == gradient_y.shape == (height, width)
+	# if wrap_x:
+	# 	arr = np.concatenate((arr, arr[:, :1, ...]), axis=1)
+	# 	new_size[0] += 1
 
-	if magnitude:
-		gradient_mag = np.sqrt(np.square(gradient_x), np.square(gradient_y))
-		if scale01:
-			gradient_mag = rescale(gradient_mag, data_range(gradient_mag), (0., 1.))
-		return gradient_mag
-	else:
-		if scale01:
-			max_abs_gradient = max(np.amax(gradient_x), np.amax(gradient_y))
-			gradient_x = rescale(gradient_x, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
-			gradient_y = rescale(gradient_y, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
-		return gradient_x, gradient_y
+	# if wrap_y:
+	# 	arr = np.concatenate((arr, arr[:1, :, ...]), axis=0)
+	# 	new_size[1] += 1
+
+	im = Image.fromarray(arr, mode=mode)
+	im = im.resize(tuple(new_size), resample=resampling)
+	arr = np.asarray(im, dtype=float)
+
+	# if wrap_x and wrap_y:
+	# 	arr = arr[:-1, :-1, ...]
+	# elif wrap_y:
+	# 	arr = arr[:-1, :, ...]
+	# elif wrap_x:
+	# 	arr = arr[:, :-1, ...]
+
+	if any_nan:
+		if verbose:
+			print(f'Image shape: {arr.shape}')
+			for channel in range(arr.shape[-1]):
+				print(f'Channel {channel}, range: {utils.numeric.data_range(arr[..., channel])}')
+
+		arr = alpha_to_nan(arr)
+
+	if len(arr.shape) == 3 and arr.shape[2] == 1:
+		arr = arr.reshape((arr.shape[0], arr.shape[1]))
+
+	rescale(arr, range_in=(dtype_min_val, dtype_max_val), range_out=data_range, in_place=True)
+
+	return arr
 
 
 def average_color(values: np.ndarray, /, *, median=False, luv_space=True) -> np.ndarray:
@@ -585,3 +523,435 @@ def remap(
 		ret[nan_map, :] = nan
 
 	return ret
+
+
+def matplotlib_figure_canvas_to_image(figure: Figure, canvas: FigureCanvas):
+
+	# https://stackoverflow.com/questions/35355930/matplotlib-figure-to-image-as-a-numpy-array
+	canvas.draw()
+	return np.frombuffer(canvas.tostring_rgb(), dtype='uint8').reshape(figure.canvas.get_width_height()[::-1] + (3,))
+
+
+def _pad_sphere_image_for_convolution(im: np.ndarray, /, large_sobel: bool) -> np.ndarray:
+	height, width = im.shape
+
+	first_col = im[:, :1]
+	last_col = im[:, -1:]
+	if large_sobel:
+		second_col = im[:, 1:2]
+		second_last_col = im[:, -2:-1]
+		im = np.concatenate((second_last_col, last_col, im, first_col, second_col), axis=1)
+		assert im.shape == (height, width + 4)
+	else:
+		im = np.concatenate((last_col, im, first_col), axis=1)
+		assert im.shape == (height, width + 2)
+
+	first_row = np.fliplr(im[:1, :])
+	last_row = np.fliplr(im[-1:, :])
+	if large_sobel:
+		second_row = np.fliplr(im[1:2, :])
+		second_last_row = np.fliplr(im[-2:-1, :])
+		im = np.concatenate((second_row, first_row, im, last_row, second_last_row), axis=0)
+		assert im.shape == (height + 4, width + 4)
+	else:
+		im = np.concatenate((first_row, im, last_row), axis=0)
+		assert im.shape == (height + 2, width + 2)
+	
+	return im
+
+
+def gaussian_blur(im: np.ndarray, sigma: float, truncate=4.0, mode='nearest', min_sigma_px: float = 0.0, **kwargs):
+	if min_sigma_px and sigma < min_sigma_px:
+		return im
+	return scipy.ndimage.gaussian_filter(im, sigma=sigma, truncate=truncate, mode=mode, **kwargs)
+
+
+def sphere_gaussian_blur(
+		im: np.ndarray,
+		sigma: float,
+		min_sigma_px: float = 0.5,
+		truncate=4.0,
+		latitude_sections=6,
+		):
+
+	height = im.shape[0]
+	width = im.shape[1]
+
+	# Blur X
+	# Vary sigma with latitude
+
+	im_blur = im.copy()
+	latitude_boundaries = np.linspace(-90, 90, latitude_sections + 1, endpoint=True)
+
+	latitude = linspace_midpoint(90, -90, height)
+
+	for i in range(latitude_sections):
+		latitude_start = latitude_boundaries[i]
+		latitude_end = latitude_boundaries[i + 1]
+
+		# Technically not correct - want average sigma_scale, not average latitude
+		# Should be a close enough approximation except maybe for center secion (especially if odd latitude_sections)
+		avg_latitude = 0.5 * (latitude_start + latitude_end)
+		sigma_scale = np.cos(np.radians(avg_latitude))
+		latitude_x_sigma = sigma / sigma_scale
+
+		if not (min_sigma_px and latitude_x_sigma < min_sigma_px):
+			latitude_mask = np.logical_and(
+				latitude >= latitude_start if i == 0 else latitude > latitude_start,
+				latitude <= latitude_end)
+
+			im_blur[latitude_mask, ...] = scipy.ndimage.gaussian_filter1d(
+				im[latitude_mask, ...], sigma=latitude_x_sigma, truncate=truncate, axis=1, mode='wrap')
+
+	# Blur Y
+
+	"""
+	Do Y after X
+	Normally Gaussian blur is totally separable so order shouldn't matter, but in this case the X blur can result in
+	artifacts at section boundaries, which the Y blur will hide
+	"""
+
+	if not (min_sigma_px and sigma < min_sigma_px):
+		im_rot180 = np.flip(im_blur, axis=None)
+
+		if True:
+			im_blur = np.concatenate((im_blur, im_rot180), axis=0)
+			im_blur = scipy.ndimage.gaussian_filter1d(im_blur, sigma=sigma, truncate=truncate, axis=0, mode='wrap')
+			im_blur = im_blur[:height, ...]
+		else:
+			# TODO: likely faster, but need to test to make sure it works properly!
+			needed_rows = min(height, ceil(sigma * truncate))
+			im_blur = np.concatenate((im_rot180[-needed_rows:, ...], im_blur, im_rot180[:needed_rows, ...]), axis=0)
+			im_blur = scipy.ndimage.gaussian_filter1d(im_blur, sigma=sigma, truncate=truncate, axis=0, mode='nearest')
+			im_blur = im_blur[needed_rows : needed_rows + height, ...]
+
+	assert im_blur.shape == im.shape
+
+	return im_blur
+
+
+def gradient(
+		im: np.ndarray, /, *,
+		magnitude: bool = False,
+		d_step: Optional[float] = None,
+		auto_scale: bool = False,
+		sobel: bool = True,
+		large_sobel: bool = False,
+		) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+	"""
+	Calculate gradient
+
+	:param im: data to calculate gradient
+	:param magnitude: return magnitude; otherwise, return (x, y)
+	:param d_step: dx & dy step size; ignored if auto_scale; default is 1/height
+	:param auto_scale: scale resulting data to [0, 1] if magnitude, or [-1, 1] if not
+	:param sobel: use 3x3 Sobel filters
+	:param large_sobel: use 5x5 Sobel filters
+
+	:returns: gradient magnitude if magnitude=True, otherwise (gx, gy)
+	"""
+
+	height, width = im.shape
+
+	if d_step is None:
+		d_step = 1.0 / height
+
+	if large_sobel:
+		gx = np.array([
+			[1, 2, 0, -2, -1],
+			[4, 8, 0, -8, -4],
+			[6, 12, 0, -12, -6],
+			[4, 8, 0, -8, -4],
+			[1, 2, 0, -2, -1]])
+	elif sobel:
+		gx = np.array([
+			[1, 0, -1],
+			[2, 0, -2],
+			[1, 0, -1]])
+	else:
+		# TODO: can use np.gradient() in this case instead of needing convolve2d(), likely faster
+		gx = np.array([[1, 0, -1]])
+
+	kernel_magnitude = np.sum(np.abs(gx))
+	gx = gx / (d_step * kernel_magnitude)
+
+	# Negate Y axis so gradient will be relative to Cartesian coordinates (not screen)
+	gy = -np.transpose(gx)
+
+	gradient_x = scipy.signal.convolve2d(im, gx, mode='same', boundary='symm')
+	gradient_y = scipy.signal.convolve2d(im, gy, mode='same', boundary='symm')
+
+	assert gradient_x.shape == gradient_y.shape == (height, width)
+
+	if magnitude:
+		gradient_mag = magnitude(gradient_x, gradient_y)
+		if auto_scale:
+			gradient_mag = rescale(gradient_mag)
+		return gradient_mag
+	else:
+		if auto_scale:
+			max_abs_gradient = max(np.amax(gradient_x), np.amax(gradient_y))
+			gradient_x = rescale(gradient_x, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
+			gradient_y = rescale(gradient_y, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
+		return gradient_x, gradient_y
+
+
+def sphere_gradient(
+		im: np.ndarray, /, *,
+		magnitude: bool = False,
+
+		d_step: Optional[float] = None,
+		auto_scale: bool = False,
+		scale_earth: bool = False,
+
+		latitude_adjust: bool = True,
+		min_latitude_adjust_circumference = 0.1,
+
+		sobel: bool = True,
+		large_sobel: bool = False,
+		) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+	"""
+	Calculate gradient of equirectangular projection data
+
+	:param im: data to calculate gradient
+	:param magnitude: return magnitude; otherwise, return (x, y)
+
+	:param d_step: dx & dy step size; ignored if auto_scale; if scale_earth, will set size relative to Earth; default (if not scale_earth) is 1/height
+	:param auto_scale: scale resulting data to [0, 1] if magnitude, or [-1, 1] if not
+	:param scale_earth: scale relative to Earth circumference (in meters)
+
+	:param latitude_adjust: adjust X gradient with latitude to correct for equirectangular distortion
+	:param min_latitude_adjust_circumference: Do not adjust latitude when circumference is less than this (relative to total)
+
+	:param sobel: use 3x3 Sobel filters
+	:param large_sobel: use 5x5 Sobel filters
+
+	:returns: gradient magnitude if magnitude=True, otherwise (gx, gy)
+	"""
+
+	height, width = im.shape
+	if width != 2 * height:
+		raise ValueError(f'sphere_gradient() image must have aspect ratio 2 ({im.shape=})')
+
+	if auto_scale:
+		# Doesn't matter, scale will be adjusted later anyway
+		circumference_x = circumference_y = 1.0
+	elif scale_earth:
+		if d_step is None:
+			d_step = 1.0
+		circumference_y = d_step * EARTH_POLAR_CIRCUMFERENCE_M
+		circumference_x = d_step * EARTH_EQUATORIAL_CIRCUMFERENCE_M
+	else:
+		if d_step is None:
+			d_step = 1.0 / height
+		circumference_x = circumference_y = d_step * TWOPI
+
+	min_latitude_adjust_circumference *= circumference_y
+
+	if large_sobel:
+		gx = np.array([
+			[1, 2, 0, -2, -1],
+			[4, 8, 0, -8, -4],
+			[6, 12, 0, -12, -6],
+			[4, 8, 0, -8, -4],
+			[1, 2, 0, -2, -1]])
+	elif sobel:
+		gx = np.array([
+			[1, 0, -1],
+			[2, 0, -2],
+			[1, 0, -1]])
+	else:
+		# TODO: can use np.gradient() in this case instead of needing convolve2d(), likely faster
+		gx = np.array([[1, 0, -1]])
+
+	# Negate Y axis so gradient will be relative to Cartesian coordinates (not screen)
+	gy = -np.transpose(gx)
+
+	kernel_magnitude = np.sum(np.abs(gx))
+
+	# Want to wrap image in X dimension, but not in Y (only matters for Sobel, not for 1D)
+	if GRADIENT_CORRECT_WRAPPING and (sobel or large_sobel):
+		im = _pad_sphere_image_for_convolution(im, large_sobel=large_sobel)
+		assert im.shape == (height + 4, width + 4) if large_sobel else (height + 2, width + 2)
+		gradient_x = scipy.signal.convolve2d(im, gx, mode='valid')
+		gradient_y = scipy.signal.convolve2d(im, gy, mode='valid')
+	else:
+		gradient_x = scipy.signal.convolve2d(im, gx, mode='same', boundary='wrap')
+		gradient_y = scipy.signal.convolve2d(im, gy, mode='same', boundary='symm')
+
+	# Y gradient is easy since we're using equirectangular projection so y step size is constant
+	dy = circumference_y / (2 * height)
+	gradient_y /= (kernel_magnitude * dy)
+
+	if not latitude_adjust:
+		dx = dy
+	else:
+		latitude_radians = linspace_midpoint(start=-PI/2, stop=PI/2, num=height)
+		circumference_at_latitude = circumference_x * np.cos(latitude_radians)
+		assert np.amin(circumference_at_latitude) > 0
+
+		if min_latitude_adjust_circumference:
+			circumference_at_latitude_clipped = np.maximum(circumference_at_latitude, min_latitude_adjust_circumference)
+
+		# TODO: could be slightly more efficient here by calculating all at once (1 less division)
+
+		dx = circumference_at_latitude_clipped / width
+
+		# TODO: broadcast instead of tile
+		dx = np.tile(dx.reshape((height, 1)), (1, width))
+		assert dx.shape == gradient_x.shape == (height, width), f"{gradient_x.shape=}, {dx.shape=}"
+
+	gradient_x /= (kernel_magnitude * dx)
+
+	assert gradient_x.shape == gradient_y.shape == (height, width)
+
+	if magnitude:
+		gradient_mag = magnitude(gradient_x, gradient_y)
+		if auto_scale:
+			gradient_mag = rescale(gradient_mag, data_range(gradient_mag), (0., 1.))
+		return gradient_mag
+	else:
+		if auto_scale:
+			max_abs_gradient = max(np.amax(gradient_x), np.amax(gradient_y))
+			gradient_x = rescale(gradient_x, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
+			gradient_y = rescale(gradient_y, (-max_abs_gradient, max_abs_gradient), (-1., 1.))
+		return gradient_x, gradient_y
+
+
+def gaussian_blur_map(
+		map_im: np.ndarray,
+		/,
+		sigma_km: float,
+		*,
+		flat: bool,
+		latitude_span: float = 180,
+		min_sigma_px: float = 0.5,
+		truncate = 4.0,
+		) -> np.ndarray:
+	"""
+	Gaussian blur map at Earth scale
+
+	:param map_im: Map image to blur
+	:param sigma_km: Gaussian blur size
+	:param flat: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
+	:param latitude_span: Latitude range covered by map. Must be 180 if not flat
+	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
+	:param truncate: How many sigma to truncate kernel
+	"""
+
+	# TODO: option to auto resize if sigma is large
+
+	if isclose(latitude_span, 180):
+		latitude_span = 180
+
+	if (not flat) and latitude_span != 180:
+		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
+
+	im_height = map_im.shape[0]
+
+	sigma = im_height * (sigma_km / EARTH_POLAR_CIRCUMFERENCE_KM) * (360 / latitude_span)
+
+	blur_func = gaussian_blur if flat else sphere_gaussian_blur
+
+	return blur_func(map_im, sigma=sigma, truncate=truncate, min_sigma_px=min_sigma_px)
+
+
+def map_gradient(
+		map_im: np.ndarray,
+		/,
+		flat: bool,
+		*,
+		magnitude: bool = False,
+		latitude_span: float = 180.0,
+		sigma_km: float = 0.0,
+		min_sigma_px: float = 0.5,
+		truncate = 4.0,
+		sobel=False,
+		large_sobel=False,
+		**gradient_kwargs,
+		) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+	"""
+	Calculate gradient of map at Earth scale
+
+	:param map_im: Map image to calculate gradient. Data is assumed to be in meters.
+	:param flat: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
+	:param magnitude: if True, return magnitude; otherwise return (x, y)
+	:param latitude_span: Latitude range covered by map. Must be 180 if not flat
+	:param sigma_km: Gaussian blur size
+	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
+	:param truncate: How many sigma to truncate Gaussian blur kernel
+	:param sobel: Use 3x3 Sobel operators for gradient
+	:param large_sobel: Use 5x5 Sobel operators for gradient
+	"""
+
+	# TODO: option to auto resize if sigma is large
+
+	if isclose(latitude_span, 180):
+		latitude_span = 180
+
+	if (not flat) and latitude_span != 180:
+		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
+
+	im_height = map_im.shape[0]
+
+	if sigma_km > 0:
+		map_im_blurred = gaussian_blur_map(
+			map_im,
+			sigma_km=sigma_km,
+			flat=flat,
+			latitude_span=latitude_span,
+			min_sigma_px=min_sigma_px,
+			truncate=truncate,
+		)
+	else:
+		map_im_blurred = map_im
+
+	gradient_kwargs['magnitude'] = magnitude
+	gradient_kwargs['sobel'] = sobel
+	gradient_kwargs['large_sobel'] = large_sobel
+
+	if flat:
+		d_step_m = (latitude_span * EARTH_POLAR_CIRCUMFERENCE_M) / (360 * im_height)
+		return gradient(map_im_blurred, d_step=d_step_m, **gradient_kwargs)
+	else:
+		return sphere_gradient(map_im_blurred, scale_earth=True, **gradient_kwargs)
+
+
+def divergence(*, x: np.ndarray, y: np.ndarray, d_step: Optional[float]=None):
+
+	if d_step is None:
+		d_step = 1.0 / x.shape[0]
+
+	return (np.gradient(y, axis=0) + np.gradient(x, axis=1)) / d_step
+
+
+def sphere_divergence(*, x: np.ndarray, y: np.ndarray, d_step: Optional[float]=None, latitude_adjust=True):
+
+	require_same_shape(x, y)
+
+	if d_step is None:
+		d_step = 1.0 / x.shape[0]
+
+	x_wrapped = np.concatenate((x[:, -1:], x, x[:, :1]), axis=1)
+	assert x_wrapped.shape == (x.shape[0], x.shape[1] + 2)
+	gradient_x = np.gradient(x_wrapped, axis=1)
+	gradient_x = gradient_x[:, 1:-1]
+	assert gradient_x.shape == x.shape
+
+	gradient_y = np.gradient(y, axis=0)
+
+	if latitude_adjust:
+		height, width = x.shape
+
+		latitude_radians = linspace_midpoint(start=-PI/2, stop=PI/2, num=height)
+		dx = np.cos(latitude_radians)
+
+		assert np.amin(dx) > 0
+
+		# TODO: broadcast instead of tile
+		dx = np.tile(dx.reshape((height, 1)), (1, width))
+		assert dx.shape == gradient_x.shape == (height, width), f"{gradient_x.shape=}, {dx.shape=}"
+
+		gradient_x /= dx
+
+	return (gradient_x + gradient_y) / d_step

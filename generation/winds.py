@@ -1,0 +1,759 @@
+#!/usr/bin/env python
+
+from functools import cached_property
+from typing import Final
+
+from matplotlib.backends.backend_agg import FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib import colors
+from matplotlib import pyplot as plt
+from math import ceil
+import numpy as np
+import scipy.interpolate
+import scipy.ndimage
+
+from utils.numeric import \
+	require_same_shape, rescale, data_range, max_abs, linspace_midpoint, magnitude, clip_max_vector_magnitude
+from utils.image import \
+	matplotlib_figure_canvas_to_image, resize_array, float_to_uint8, \
+	map_gradient, gaussian_blur_map, divergence, sphere_divergence
+from utils.consts import PI, TWOPI, EARTH_POLAR_CIRCUMFERENCE_M, EARTH_EQUATORIAL_CIRCUMFERENCE_M
+from utils.utils import tprint
+
+
+"""
+TODO:
+- Calculate seasonally (even just 3 points: northern summer, equinox, southern summer)
+- Use coriolis in _bend_direction_for_elevation()
+- More advanced Ferrel Cell simulation
+	- Summer: ocean is high pressure, land is low pressure (inverse in winter)
+	- Northen hemisphere: clockwise around high pressure, anticlockwise around low pressure (inverse in Southern)
+
+Optimization:
+- Most steps need to be calculated at full resolution - anything that's blurred (which is almost everything) can be downscaled
+- Latitude can be a 1D array that gets broadcasted when needed
+"""
+
+
+WIND_CMAP = plt.get_cmap('viridis')
+IMPEDANCE_CMAP = plt.get_cmap('RdYlBu')
+DIV_CMAP = plt.get_cmap('bwr')
+
+
+# Direction is based on linear interpolation, so wrapping around won't work
+BASE_WIND_STRENGTH_DIR_BY_LATITUDE: Final = [
+	# Polar cells
+	(90.001, 6.5, -90),  # S
+	(60.5,  9.0, -135),  # SW
+
+	# Polar jet stream
+	(60.0, 9.0, 0),  # E
+
+	# Ferrel cells
+	(59.5,  9.0, 22.5),  # ENE
+	(45.0,   8.0, 60),  # NE
+	(31.0,  6.5, 90),  # N
+
+	# Subtropical jet stream
+	(30.0, 6.5, 0),  # E
+
+	# Hadley cells
+	(29.0,  6.5, -90),  # S
+	(15.0,   8.0, -135),  # SW
+	(-0.001, 4.5, -180),  # W
+]
+
+_wind_strength_interpolator = scipy.interpolate.interp1d(
+	[latitude for latitude, _, _ in BASE_WIND_STRENGTH_DIR_BY_LATITUDE],
+	[strength for _, strength, _ in BASE_WIND_STRENGTH_DIR_BY_LATITUDE],
+	kind='linear'
+)
+_wind_dir_interpolator = scipy.interpolate.interp1d(
+	[latitude for latitude, _, _ in BASE_WIND_STRENGTH_DIR_BY_LATITUDE],
+	[np.radians(dir) for _, _, dir in BASE_WIND_STRENGTH_DIR_BY_LATITUDE],
+	kind='linear'
+)
+
+
+REDUCE_WIND_SPEED_ON_LAND: Final = 4.0
+MAX_GRADIENT_DIRECTION_SHIFT: Final = 0.75
+MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL: Final = 0.5
+HILL_MAP_LAND_SCALE: Final = 2.0
+HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
+HILL_MAP_GRADIENT_SCALE: Final = 1e6
+
+
+class WindSimulation:
+	def __init__(
+			self,
+			topography_m: np.ndarray,
+			latitude_deg: np.ndarray,  # TODO: make this able to be specified as a range instead
+			flat: bool):
+
+		self._dtype = topography_m.dtype
+
+		self._topography_m = topography_m
+		self._latitude_deg = latitude_deg
+		self._flat = flat
+
+		latitude_range = data_range(latitude_deg)
+		latitude_step = abs(latitude_deg[1, 0] - latitude_deg[0, 0])
+		self._latitude_range = (latitude_range[0] - 0.5*latitude_step, latitude_range[1] + 0.5*latitude_step)
+
+		self._latitude_span = self._latitude_range[1] - self._latitude_range[0]
+		assert self._latitude_span >= 0
+		if self._latitude_span == 0:
+			raise ValueError('Map must span non-zero latitude')
+
+		self._base_magnitude_mps = None
+		self._base_dir_unit_x = None
+		self._base_dir_unit_y = None
+
+		self._magnitude_mps = None
+		self._dir_unit_x = None
+		self._dir_unit_y = None
+
+	# Simple getter properties
+
+	@property
+	def topography_m(self) -> np.ndarray:
+		return self._topography_m
+
+	@property
+	def latitude_deg(self) -> np.ndarray:
+		return self._latitude_deg
+
+	@property
+	def latitude_range_deg(self) -> tuple[float, float]:
+		return self._latitude_range
+
+	@property
+	def latitude_span_deg(self) -> float:
+		return self._latitude_span
+
+	@property
+	def flat(self) -> bool:
+		return self._flat
+
+	# Non-simple & cached properties
+	# TODO: not all of these need to be cached, for the sake of saving memory
+
+	@property
+	def base_magnitude_mps(self) -> np.ndarray:
+		if self._base_magnitude_mps is None:
+			self._make_base_winds()
+		assert self._base_magnitude_mps is not None
+		return self._base_magnitude_mps
+
+	@property
+	def base_direction_unit_vectors(self) -> tuple[np.ndarray, np.ndarray]:
+		if (self._base_dir_unit_x is None) or (self._base_dir_unit_y is None):
+			self._make_base_winds()
+		assert (self._base_dir_unit_x is not None) and (self._base_dir_unit_y is not None)
+		return self._base_dir_unit_x, self._base_dir_unit_y
+
+	@property
+	def base_winds_mps(self) -> tuple[np.ndarray, np.ndarray]:
+		mag = self.base_magnitude_mps
+		unit_x, unit_y = self.base_direction_unit_vectors
+		return mag * unit_x, mag * unit_y
+
+	@cached_property
+	def land_mask(self) -> np.ndarray:
+		return self._topography_m >= 0
+
+	@cached_property
+	def elevation_m(self) -> np.ndarray:
+		return np.maximum(0.0, self._topography_m)
+
+	@cached_property
+	def elevation_blur(self) -> np.ndarray:
+		return gaussian_blur_map(self.elevation_m, sigma_km=100.0, flat=self.flat, latitude_span=self.latitude_span_deg)
+
+	@cached_property
+	def land_blur(self) -> np.ndarray:
+		land = self.land_mask.astype(self._dtype)
+		blurred = gaussian_blur_map(land, sigma_km=1000.0, flat=self.flat, latitude_span=self.latitude_span_deg)
+		blurred += gaussian_blur_map(land, sigma_km=10000.0, flat=self.flat, latitude_span=self.latitude_span_deg)
+		blurred *= 0.5
+		return blurred
+
+	@cached_property
+	def hill_map(self) -> np.ndarray:
+		return HILL_MAP_ELEVATION_SCALE * self.elevation_blur + HILL_MAP_LAND_SCALE * self.land_blur
+
+	@cached_property
+	def hill_gradients(self) -> tuple[np.ndarray, np.ndarray]:
+		return map_gradient(
+			self.hill_map * HILL_MAP_GRADIENT_SCALE,
+			flat=self.flat,
+			latitude_span=self.latitude_span_deg,
+		)
+
+	@cached_property
+	def hill_gradients_clipped(self):
+		hill_gradient_x, hill_gradient_y = self.hill_gradients
+		return clip_max_vector_magnitude(hill_gradient_x, hill_gradient_y, 1.0)
+
+	@cached_property
+	def wind_dir_dot_clipped_hill_gradient(self):
+		assert (self._base_dir_unit_x is not None) and (self._base_dir_unit_y is not None)
+		hill_gradient_x, hill_gradient_y = self.hill_gradients_clipped
+		return self._base_dir_unit_x * hill_gradient_x + self._base_dir_unit_y * hill_gradient_y
+
+	# Freeing memory
+
+	def clear_cache(self):
+		self._base_magnitude_mps = None
+		self._base_dir_unit_x = None
+		self._base_dir_unit_y = None
+		del self.land_mask
+		del self.elevation_m
+		del self.elevation_blur
+		del self.land_blur
+		del self.hill_map
+		del self.hill_gradients
+		del self.hill_gradients_clipped
+		del self.wind_dir_dot_clipped_hill_gradient
+
+	# Processing
+
+	def process(self, keep_cache=False) -> tuple[np.ndarray, np.ndarray]:
+		"""
+		:returns: (wind X, wind Y) in meters per second
+		"""
+
+		self._make_base_winds()
+		self._scale_magnitude_for_land()
+		self._bend_direction_for_elevation()
+
+		assert self._magnitude_mps is not None
+		assert self._dir_unit_x is not None
+		assert self._dir_unit_y is not None
+
+		ret_x = self._magnitude_mps * self._dir_unit_x
+		ret_y = self._magnitude_mps * self._dir_unit_y
+
+		if not keep_cache:
+			self.clear_cache()
+
+		return ret_x, ret_y
+
+	def _make_base_winds(self):
+
+		assert all(val is None for val in [self._base_magnitude_mps, self._base_dir_unit_x, self._base_dir_unit_y])
+
+		# TODO: latitude only really needs to be 1D array
+
+		latitude_deg = self.latitude_deg
+
+		southern = (latitude_deg < 0)
+		abs_latitude_deg = np.abs(latitude_deg)
+
+		magnitude_mps = _wind_strength_interpolator(abs_latitude_deg)
+		wind_direction = _wind_dir_interpolator(abs_latitude_deg)
+
+		dir_unit_x = np.cos(wind_direction)
+		dir_unit_y = np.sin(wind_direction)
+
+		dir_unit_y[southern] = -dir_unit_y[southern]
+
+		self._base_magnitude_mps = magnitude_mps
+		self._base_dir_unit_x = dir_unit_x
+		self._base_dir_unit_y = dir_unit_y
+
+	def _scale_magnitude_for_land(self):
+		assert self._magnitude_mps is None
+		assert self._base_magnitude_mps is not None
+		land_blur = self.land_blur
+		self._magnitude_mps = self._base_magnitude_mps / rescale(land_blur, (0., 1.), (1., REDUCE_WIND_SPEED_ON_LAND))
+
+	def _bend_direction_for_elevation(self):
+		assert (self._base_dir_unit_x is not None) and (self._base_dir_unit_y is not None)
+		assert (self._dir_unit_x is None) and (self._dir_unit_y is None)
+
+		hill_gradient_x, hill_gradient_y = self.hill_gradients_clipped
+
+		"""
+		Amount we adjust wind depends on dot product:
+
+			< 0: wind is going downhill
+				- More on this later
+
+			0: wind is perpendicular to slope
+				- Don't scale
+
+			> 0: Wind is going somewhat uphill
+				- Bend it away from the hill
+				- Bigger dot product = steeper slope and/or more directly uphill = more bend
+
+			1: Wind is going pefectly uphill
+				- In theory, bend the maximum amount
+				- However, unit vectors cancel out, so no resulting change (assuming max_dir_shift < 1)
+
+		Example:
+
+			max_dir_shift = 0.5
+			Input wind = 45° NE = (0.71, 0.71)
+			Impedance gradient = N, steep = (0, 1)
+
+			dot_product = 0 * 0.71 + 1 * 0.71 = 0.71
+
+			Shifted:
+				= wind - max_dir_shift * dot_product * impedance
+				= (0.71, 0.71) - 0.5 * 0.71 * (0, 1)
+				= (0.71, 0.71) - (0, 0.36)
+				= (0.71, 0.36)
+
+			Renormalize: (0.89, 0.45) = 26° NE
+
+		What about negative?
+
+		- Bend the wind *away* from downhill, not toward as you might suspect
+		- But the effect is quite a bit weaker than uphill
+		- This is more consistent with how aerodynamics behave. My non mechanincal engineering understanding of this:
+			- The hill will have pushed away wind on the uphill side
+			- This leads to lower air pressure on the downhill side, which sucks wind toward the hill
+		"""
+
+		# TODO: factor in Coriolis as well
+
+		assert MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL >= 0
+
+		if MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL == 0:
+			wind_adjust = rescale(self.wind_dir_dot_clipped_hill_gradient, (0.0, 1.0), (0.0, MAX_GRADIENT_DIRECTION_SHIFT), clip=True)
+		else:
+			positive_mask = self.wind_dir_dot_clipped_hill_gradient >= 0
+			negative_mask = np.logical_not(positive_mask)
+			wind_adjust = self.wind_dir_dot_clipped_hill_gradient.copy()
+			wind_adjust[positive_mask] *= MAX_GRADIENT_DIRECTION_SHIFT
+			wind_adjust[negative_mask] *= MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL
+
+		dir_unit_x = self._base_dir_unit_x - (wind_adjust * hill_gradient_x)
+		dir_unit_y = self._base_dir_unit_y - (wind_adjust * hill_gradient_y)
+
+		# Renormalize direction
+		unit_mag = magnitude(dir_unit_x, dir_unit_y)
+		assert np.amin(unit_mag) > 0
+		dir_unit_x /= unit_mag
+		dir_unit_y /= unit_mag
+
+		self._dir_unit_x = dir_unit_x
+		self._dir_unit_y = dir_unit_y
+
+
+def make_prevailing_wind(latitude_deg: np.ndarray, topography_m: np.ndarray, flat=False) -> tuple[np.ndarray, np.ndarray]:
+	"""
+	:returns: (prevailing wind x, prevailing wind y), in meters/second
+	"""
+	sim = WindSimulation(topography_m=topography_m, latitude_deg=latitude_deg, flat=flat)
+	return sim.process()
+
+
+def make_prevailing_wind_imgs(
+		prevailing_wind_mps: tuple[np.ndarray, np.ndarray],
+		latitude_range: tuple[float, float],
+		) -> list[np.ndarray]:
+
+	SHOW_DIRECTION: Final = True
+	SHOW_AXES: Final = False
+	SCALE_MAX_WIND: Final = 12.0
+
+	wind_x, wind_y = prevailing_wind_mps
+	assert wind_x.shape == wind_y.shape
+	assert len(wind_x.shape) == 2
+	height, width = wind_x.shape
+
+	longitude_span = abs(latitude_range[1] - latitude_range[0]) * width / height
+	longitude_range = (-0.5*longitude_span, 0.5*longitude_span)
+
+	scale_out = ceil(512 / height)
+	assert scale_out >= 1
+	width_out = round(width * scale_out)
+	height_out = round(height * scale_out)
+
+	# Determine vector resolution
+
+	# Target cells of 10 pixels
+	arrows_width = round(width_out / 10)
+	arrows_height = round(height_out / 10)
+
+	# TODO: also want max total resolution?
+
+	# No point in arrow image having higher resolution than actual wind data
+	arrows_width = min(width, arrows_width)
+	arrows_height = min(height, arrows_height)
+
+	# Magnitude
+
+	mag = magnitude(wind_x, wind_y)
+	assert np.amin(mag) > 0
+
+	if not SHOW_DIRECTION:
+		mag_img = WIND_CMAP(rescale(mag, (0., SCALE_MAX_WIND), clip=True))
+		return [mag_img]
+
+	# Direction vectors
+
+	arrows_size = (arrows_width, arrows_height)
+	arrows_x = resize_array(wind_x, new_size=arrows_size)
+	arrows_y = resize_array(wind_y, new_size=arrows_size)
+
+	# Normalized direction vectors
+	# TODO: can matplotlib do this with quiver() args?
+
+	arrow_mags = magnitude(arrows_x, arrows_y)
+	assert np.amin(arrow_mags) > 0
+	arrows_x_norm = arrows_x / arrow_mags
+	arrows_y_norm = arrows_y / arrow_mags
+
+	# Arrow locations
+
+	arrow_locs_x = linspace_midpoint(longitude_range[0], longitude_range[1], arrows_x.shape[1])
+	arrow_locs_y = linspace_midpoint(latitude_range[1], latitude_range[0], arrows_x.shape[0])
+	arrow_step = abs(arrow_locs_y[1] - arrow_locs_y[0])
+	arrow_locs_x, arrow_locs_y = np.meshgrid(arrow_locs_x, arrow_locs_y)
+
+	# Plot with Matplotlib
+	"""
+	Plot 2 figures:
+	
+	- Magnitude as background, with normalized arrows overlaid
+	- Un-normalized arrows (with no heads)
+
+	(These show the same information, they're just different ways of displaying it)
+	"""
+
+	dpi = 100.0
+	figsize = (width_out / dpi, height_out / dpi)
+
+	# Figure 1
+
+	fig = Figure(figsize=figsize, dpi=dpi)
+	canvas = FigureCanvas(fig)
+
+	if SHOW_AXES:
+		ax = fig.gca()
+		fig.tight_layout()
+	else:
+		ax = fig.add_axes([0., 0., 1., 1.])
+		ax.set_axis_off()
+
+	ax.imshow(mag, cmap='viridis', vmin=0., vmax=SCALE_MAX_WIND, extent=[longitude_range[0], longitude_range[1], latitude_range[0], latitude_range[1]])
+
+	ax.quiver(
+		arrow_locs_x, arrow_locs_y,
+		arrows_x_norm, arrows_y_norm,
+		color='white', alpha=0.75,
+		pivot='middle',
+		angles='xy',
+		scale=1/arrow_step, scale_units='y',
+		width=arrow_step/10, units='y',
+	)
+
+	fig1 = matplotlib_figure_canvas_to_image(figure=fig, canvas=canvas)
+
+	# Figure 2
+
+	fig = Figure(figsize=figsize, dpi=dpi)
+	canvas = FigureCanvas(fig)
+
+	if SHOW_AXES:
+		ax = fig.gca()
+		fig.tight_layout()
+	else:
+		ax = fig.add_axes([0., 0., 1., 1.])
+		ax.set_axis_off()
+
+	ax.quiver(
+		arrow_locs_x, arrow_locs_y,
+		arrows_x, arrows_y,
+		color='black',
+		pivot='tail',
+		headwidth=0, headlength=0, headaxislength=0,
+	)
+	ax.set_xlim(longitude_range)
+	ax.set_ylim(latitude_range)
+
+	fig2 = matplotlib_figure_canvas_to_image(figure=fig, canvas=canvas)
+
+	return [fig1, fig2]
+
+
+def main(args=None):
+	import argparse
+	
+	from matplotlib.gridspec import GridSpec
+	from matplotlib.axes import Axes
+
+	parser = argparse.ArgumentParser()
+	mx = parser.add_mutually_exclusive_group()
+	mx.add_argument('--circle', dest='circle_only', action='store_true', help='Only run circle test')
+	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
+	args = parser.parse_args(args)
+
+	CIRCLE_MAG: Final = 6000
+
+	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
+	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
+
+	earth_topography_m = None
+	na_lat_range = na_lon_range = na_topography_m = None
+	if not args.circle_only:
+		tprint('Loading Earth data...')
+		from data import data
+		earth_topography_m = data.get_topography()
+
+		na_lat_range = (10, 65)
+		na_lon_range = (-135, -45)
+		na_y_range = (
+			round(rescale(na_lat_range[1], (90, -90), (0, earth_topography_m.shape[0]))),
+			round(rescale(na_lat_range[0], (90, -90), (0, earth_topography_m.shape[0]))))
+		na_x_range = (
+			round(rescale(na_lon_range[0], (-180, 180), (0, earth_topography_m.shape[1]))),
+			round(rescale(na_lon_range[1], (-180, 180), (0, earth_topography_m.shape[1]))))
+		na_topography_m = earth_topography_m[na_y_range[0] : 1 + na_y_range[1], na_x_range[0] : 1 + na_x_range[1]]
+		assert len(na_topography_m.shape) == 2 and na_topography_m.shape[0] > 0 and na_topography_m.shape[1] > 0, f"{na_topography_m.shape=}"
+
+	x = np.linspace(-4.0, 4.0, 512)
+	y = np.linspace(-4.0, 4.0, 512)
+	x, y = np.meshgrid(x, y)
+	r = magnitude(x, y)
+	circle_data = np.full((512, 512), -CIRCLE_MAG, dtype=np.float32)
+	circle_data[r <= 1.0] = CIRCLE_MAG
+	circle_data_latitude_range = (30, 60)
+
+	datasets = []
+
+	if args.fullres:
+		datasets += [
+			dict(
+				title=f'Earth, {earth_topography_m.shape[1]}x{earth_topography_m.shape[0]}',
+				source_data=earth_topography_m,
+				flat=False,
+				high_res_arrows=True,
+			)
+		]
+
+	if not args.circle_only:
+		datasets += [
+			dict(
+				title='Earth, 1024x512',
+				source_data=earth_topography_m,
+				resolution=(512, 1024),
+				flat=False,
+			),
+			dict(
+				title='Earth, 256x128',
+				source_data=earth_topography_m,
+				resolution=(128, 256),
+				flat=False,
+			),
+			dict(
+				title='Earth, 1024x512, flat',
+				source_data=earth_topography_m,
+				resolution=(512, 1024),
+				flat=True,
+			),
+			dict(
+				title='North America (flat)',
+				source_data=na_topography_m,
+				latitude_range=na_lat_range,
+				longitude_range=na_lon_range,
+				flat=True,
+			),
+		]
+	
+	datasets += [
+		dict(
+			title='Circle test',
+			source_data=circle_data,
+			latitude_range=circle_data_latitude_range,
+			flat=True,
+		),
+	]
+
+	for dataset in datasets:
+		dataset_title = dataset['title']
+
+		print()
+		tprint('Processing ' + dataset_title)
+
+		source_data = dataset['source_data']
+		resolution = dataset.get('resolution', None)
+		if resolution is None:
+			resolution = source_data.shape
+		height, width = resolution
+		flat = dataset['flat']
+
+		high_res_arrows = dataset.get('high_res_arrows', False)
+
+		latitude_range = dataset.get('latitude_range', (-90, 90))
+		assert latitude_range[1] > latitude_range[0]
+
+		longitude_range = dataset.get('longitude_range', None)
+		latitude_span = latitude_range[1] - latitude_range[0]
+		if longitude_range is None:
+			latitude_span = latitude_range[1] - latitude_range[0]
+			longitude_span = latitude_span * width / height
+			longitude_range = (-0.5*longitude_span, 0.5*longitude_span)
+		assert longitude_range[1] > longitude_range[0]
+
+		if resolution != source_data.shape:
+			tprint(f'Resizing {source_data.shape[1]}x{source_data.shape[0]} -> {width}x{height}...')
+			topography_m = resize_array(source_data, (width, height))
+		else:
+			topography_m = source_data
+
+		tprint('Calculating wind')
+
+		latitude_deg = linspace_midpoint(latitude_range[1], latitude_range[0], height)
+		latitude_deg = latitude_deg[..., np.newaxis]
+		latitude_deg = np.repeat(latitude_deg, repeats=width, axis=1)
+
+		sim = WindSimulation(topography_m=topography_m, latitude_deg=latitude_deg, flat=flat)
+		wind_x, wind_y = sim.process(keep_cache=True)
+
+		wind_mag = magnitude(wind_x, wind_y)
+		wind_x_norm = wind_x / wind_mag
+		wind_y_norm = wind_y / wind_mag
+
+		tprint('Calculating divergence')
+
+		div_func = divergence if flat else sphere_divergence
+
+		div = div_func(x=wind_x, y=wind_y)
+		div_norm = div_func(x=wind_x_norm, y=wind_y_norm)
+
+		tprint('Calculating arrows to plot')
+
+		max_arrows_height = MAX_ARROWS_HEIGHT_HIGH_RES if high_res_arrows else MAX_ARROWS_HEIGHT_STANDARD
+		if height >= max_arrows_height:
+			arrows_height = max_arrows_height
+			arrows_width = round(max_arrows_height * width / height)
+		else:
+			arrows_width = width
+			arrows_height = height
+
+		arrows_size = (arrows_width, arrows_height)
+		arrows_x = resize_array(wind_x, new_size=arrows_size)
+		arrows_y = resize_array(wind_y, new_size=arrows_size)
+
+		arrow_mags = magnitude(arrows_x, arrows_y)
+		assert np.amin(arrow_mags) > 0
+		arrows_x_norm = arrows_x / arrow_mags
+		arrows_y_norm = arrows_y / arrow_mags
+
+		arrow_locs_x = linspace_midpoint(longitude_range[0], longitude_range[1], arrows_x.shape[1])
+		arrow_locs_y = linspace_midpoint(latitude_range[1], latitude_range[0], arrows_x.shape[0])
+		arrow_step = abs(arrow_locs_y[1] - arrow_locs_y[0])
+		arrow_locs_x, arrow_locs_y = np.meshgrid(arrow_locs_x, arrow_locs_y)
+
+		hill_gradient_x, hill_gradient_y = sim.hill_gradients
+		hill_gradient_mag = magnitude(hill_gradient_x, hill_gradient_y)
+
+		hill_gradient_arrows_x = resize_array(hill_gradient_x, new_size=arrows_size)
+		hill_gradient_arrows_y = resize_array(hill_gradient_y, new_size=arrows_size)
+
+		base_wind_x, base_wind_y = sim.base_winds_mps
+		base_dir_arrows_x = resize_array(base_wind_x, new_size=arrows_size)
+		base_dir_arrows_y = resize_array(base_wind_y, new_size=arrows_size)
+		mag = magnitude(base_dir_arrows_x, base_dir_arrows_y)
+		base_dir_arrows_x /= mag
+		base_dir_arrows_y /= mag
+
+		quiver_kwargs = dict(
+			pivot="middle", angles="xy",
+			scale=1/arrow_step, scale_units="y",
+			width=arrow_step/10, units="y",
+		)
+
+		tprint('Plotting')
+
+		# fig, ax = plt.subplots(3, 4)
+
+		fig = plt.figure()
+		gs = GridSpec(3, 4, figure=fig)
+
+		def _plot(
+				pos_or_axes,
+				data: np.ndarray,
+				title: str = '',
+				colorbar = True,
+				colorbar_loc = 'bottom',
+				grid = False,
+				add_range_to_title=True,
+				cmap = 'inferno',
+				**kwargs):
+
+			if isinstance(pos_or_axes, Axes):
+				ax = pos_or_axes
+			else:
+				ax = fig.add_subplot(pos_or_axes)
+
+			im = ax.imshow(
+				data,
+				extent=(longitude_range[0], longitude_range[1], latitude_range[0], latitude_range[1]),
+				cmap=cmap,
+				**kwargs)
+
+			if colorbar:
+				fig.colorbar(im, ax=ax, location=colorbar_loc)
+
+			if grid:
+				ax.grid()
+
+			if add_range_to_title:
+				if title:
+					title += ' '
+				dr = data_range(data)
+				title += f'[{dr[0]:.2g}, {dr[1]:.2g}]'
+
+			if title:
+				ax.set_title(title)
+
+			return ax
+
+		fig.suptitle(dataset_title)
+
+		_plot(gs[0, 0], sim.elevation_m, title='Elevation (m)')
+		_plot(gs[0, 1], sim.land_blur, title='Land blur')
+		_plot(gs[0, 2], sim.elevation_blur, title='Elevation blur')
+		_plot(gs[0, 3], sim.hill_map, vmin=0.0, title='Hill map')
+
+		ax_hill_gradient = _plot(gs[1, 2], hill_gradient_mag, title='Hill map gradient')
+		_plot(gs[1, 3], sim.wind_dir_dot_clipped_hill_gradient, cmap='bwr', title='wind dot hill gradient (clipped)')
+
+		_plot(gs[2, 2], div, cmap='bwr', title='Divergence', norm=colors.SymLogNorm(linthresh=1, vmin=-1e3, vmax=1e3))
+		_plot(gs[2, 3], div_norm, cmap='bwr', title='Divergence of normalized', norm=colors.SymLogNorm(linthresh=1, vmin=-1e3, vmax=1e3))
+
+
+		wind_elevation_im = sim.elevation_m.copy()
+		wind_elevation_im[topography_m < 0] = -1000.
+
+		# TODO: is it possible to overlay this with elevation, without it looking messy?
+		# ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
+		ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
+
+		_plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+
+		# TODO: make this less ugly
+		ax_wind.quiver(
+			arrow_locs_x, arrow_locs_y, base_dir_arrows_x, base_dir_arrows_y,
+			color='red', alpha=0.75, **quiver_kwargs)
+
+		ax_wind.quiver(
+			arrow_locs_x, arrow_locs_y, arrows_x_norm, arrows_y_norm,
+			color='white', alpha=0.75, **quiver_kwargs)
+
+		ax_hill_gradient.quiver(
+			arrow_locs_x, arrow_locs_y, hill_gradient_arrows_x, hill_gradient_arrows_y,
+			color='white', alpha=0.5, **quiver_kwargs)
+
+	print()
+	tprint('Showing plots')
+	plt.show()
+
+
+if __name__ == "__main__":
+	main()

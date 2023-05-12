@@ -20,9 +20,9 @@ from PIL import Image
 import requests
 from tqdm import trange, tqdm
 
-from utils.image import sphere_gradient, array_to_image, disable_pil_max_pixels, resize_array
+from utils.image import array_to_image, disable_pil_max_pixels, resize_array, sphere_gradient
 import utils.numeric
-from utils.numeric import rescale, rescale_in_place, data_range, max_abs
+from utils.numeric import rescale, data_range, max_abs
 from utils.utils import tprint
 
 
@@ -120,7 +120,7 @@ def _import_img(
 	if as_float:
 		assert data.dtype == float
 		if data_range is not None:
-			rescale_in_place(data, range_in=(0., 1.), range_out=data_range)
+			rescale(data, range_in=(0., 1.), range_out=data_range, in_place=True)
 	else:
 		assert data.dtype == np.uint8
 
@@ -872,20 +872,20 @@ def main(args=None):
 		tprint('Processing gradient...')
 		elevation = get_elevation()
 
-		gx, gy = sphere_gradient(elevation, scale01=False, latitude_adjust=True, sobel=False)
+		gx, gy = sphere_gradient(elevation, scale_earth=True, latitude_adjust=True, sobel=False)
 		gm = np.sqrt(np.square(gx) + np.square(gy))
 		tprint('sphere_gradient(sobel=False) range: mag [%f,%f] X [%f, %f] Y [%f, %f]' % (*data_range(gm), *data_range(gx), *data_range(gy)))
 		_show_gradient(elevation, gm, gx, gy, 'sphere_gradient(sobel=False)')
 
-		gx, gy = sphere_gradient(elevation, scale01=False, latitude_adjust=True, sobel=True)
+		gx, gy = sphere_gradient(elevation, scale_earth=True, latitude_adjust=True, sobel=True)
 		tprint('sphere_gradient(sobel=True) range: mag [%f,%f] X [%f, %f] Y [%f, %f]' % (*data_range(gm), *data_range(gx), *data_range(gy)))
 		_show_gradient(elevation, gm, gx, gy, 'sphere_gradient(sobel=True)')
 
-		gx, gy = sphere_gradient(elevation, scale01=False, latitude_adjust=True, large_sobel=True)
+		gx, gy = sphere_gradient(elevation, scale_earth=True, latitude_adjust=True, large_sobel=True)
 		tprint('sphere_gradient(large_sobel=True) range: mag [%f,%f] X [%f, %f] Y [%f, %f]' % (*data_range(gm), *data_range(gx), *data_range(gy)))
 		_show_gradient(elevation, gm, gx, gy, 'sphere_gradient(large_sobel=True)')
 
-		gx, gy = sphere_gradient(elevation, scale01=False, latitude_adjust=False, sobel=True)
+		gx, gy = sphere_gradient(elevation, scale_earth=True, latitude_adjust=False, sobel=True)
 		tprint('sphere_gradient(sobel=True, latitude_adjust=False) range: mag [%f,%f] X [%f, %f] Y [%f, %f]' % (*data_range(gm), *data_range(gx), *data_range(gy)))
 		_show_gradient(elevation, gm, gx, gy, 'sphere_gradient(sobel=True, latitude_adjust=False)')
 

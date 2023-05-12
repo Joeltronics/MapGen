@@ -17,8 +17,8 @@ import tqdm
 from data.data import _import_csv, _import_img, get_elevation, get_bathymetry, get_topography, get_land_ocean_ice, \
 	get_average_wv, get_average_veg, get_average_rain, get_mask, get_average_surface_temp, sat_vapor_density_from_temp
 
-from utils.image import float_to_uint8, array_to_image, image_to_array, resize_array, average_color, sphere_gradient
-from utils.numeric import lerp, reverse_lerp, rescale, data_range
+from utils.image import float_to_uint8, array_to_image, image_to_array, resize_array, average_color
+from utils.numeric import lerp, reverse_lerp, rescale, data_range, sphere_gradient
 from utils.utils import tprint
 
 PI = np.pi
@@ -52,7 +52,7 @@ def img_y_to_latitude(y):
 
 def get_gradient(magnitude=False, including_ocean=False, scale_dx_with_latitude=True):
 	im = get_topography() if including_ocean else get_elevation()
-	return sphere_gradient(im, magnitude=magnitude, latitude_adjust=scale_dx_with_latitude)
+	return sphere_gradient(im, magnitude=magnitude, scale_earth=True, latitude_adjust=scale_dx_with_latitude)
 
 
 def hist_2d(x_data: Sequence, y_data: Sequence, bins=256, alpha=SCATTER_ALPHA, log=True, ignore_nan=True):

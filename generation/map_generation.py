@@ -13,17 +13,23 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from PIL import Image
 
-from generation.fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
-from utils.image import float_to_uint8, gradient, sphere_gradient, linear_to_gamma, gamma_to_linear, remap
+from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
+from .winds import make_prevailing_wind, make_prevailing_wind_imgs
+
+from data.data import get_topography, get_mask
+
+from utils.image import \
+	float_to_uint8, linear_to_gamma, gamma_to_linear, remap, matplotlib_figure_canvas_to_image, resize_array, \
+	gradient, sphere_gradient
 from utils.map_projection import make_projection_map
-from utils.numeric import data_range, rescale, max_abs, require_same_shape
+from utils.numeric import data_range, rescale, max_abs, require_same_shape, linspace_midpoint
 from utils.utils import tprint
 
 
 """
 TODO:
-- prevailing winds, and with it adiabatic rainfall & rain shadows
 - tectonic continents
+- rainfall based on wind
 """
 
 
@@ -46,6 +52,7 @@ class TopographyParams:
 	elevation_steps: int
 	water_amount: float = 0.5
 	continent_size: float = 1.0
+	use_earth: bool = False
 
 
 @dataclass
@@ -67,6 +74,8 @@ class GeneratorParams:
 	topography: TopographyParams
 	temperature: TemperatureParams
 	erosion: ErosionParams
+
+	noise_strength: float = 1.0
 
 
 LAND = (0, 100, 0)  # "darkgreen"
@@ -334,7 +343,8 @@ class Planet:
 	temperature_C: Optional[np.ndarray] = None
 	temperature_img: Optional[np.ndarray] = None
 
-	prevailing_wind_img: Optional[np.ndarray] = None
+	prevailing_wind_data: Optional[tuple[np.ndarray, np.ndarray]] = None
+	prevailing_wind_imgs: Optional[list[np.ndarray]] = None
 
 	rainfall_cm: Optional[np.ndarray] = None
 	rainfall_img: Optional[np.ndarray] = None
@@ -350,44 +360,44 @@ class Planet:
 	def make(
 			cls,
 			latitude_deg: np.ndarray,
-			elevation_m: np.ndarray,
+			topography_m: np.ndarray,
 			temperature_C: np.ndarray,
-			prevailing_wind: np.ndarray,
+			prevailing_wind_mps: np.ndarray,
 			rainfall_cm: np.ndarray,
 			flat: bool,
 			graph_figure=None,
 			erosion=None,
 			) -> 'Planet':
 
-		if not (latitude_deg.shape == elevation_m.shape == temperature_C.shape == rainfall_cm.shape):
-			raise ValueError(f'Arrays do not have the same shape: {latitude_deg.shape}, {elevation_m.shape}, {temperature_C.shape}, {rainfall_cm.shape}')
+		if not (latitude_deg.shape == topography_m.shape == temperature_C.shape == rainfall_cm.shape):
+			raise ValueError(f'Arrays do not have the same shape: {latitude_deg.shape}, {topography_m.shape}, {temperature_C.shape}, {rainfall_cm.shape}')
 
-		height = elevation_m.shape[0]
-		width = elevation_m.shape[1]
+		height, width = topography_m.shape
 
-		land_mask = elevation_m >= 0
+		latitude_range = data_range(latitude_deg)
+
+		land_mask = topography_m >= 0
 		water_mask = np.invert(land_mask)
 
-		elevation_above_sea_m = np.maximum(elevation_m, 0.0)
+		elevation_above_sea_m = np.maximum(topography_m, 0.0)
 
-		max_abs_elevation = max_abs(elevation_m)
-		elevation_11 = rescale(elevation_m, range_in=(-max_abs_elevation, max_abs_elevation), range_out=(-1., 1.))
+		max_abs_elevation = max_abs(topography_m)
+		elevation_11 = rescale(topography_m, range_in=(-max_abs_elevation, max_abs_elevation), range_out=(-1., 1.))
 		temperature_01 = rescale(temperature_C)
 		rainfall_01 = rescale(rainfall_cm)
 
 		tprint('Calculating gradient')
 		if flat:
+			# FIXME: calculate scale
 			gradient_x, gradient_y = gradient(elevation_above_sea_m)
 		else:
-			gradient_x, gradient_y = sphere_gradient(elevation_above_sea_m, latitude_adjust=True)
+			gradient_x, gradient_y = sphere_gradient(elevation_above_sea_m, scale_earth=True, latitude_adjust=True)
 		gradient_mag = np.sqrt(np.square(gradient_x) + np.square(gradient_y))
 		tprint('Gradient range: X [%f, %f], Y [%f, %f], mag [%f, %f]' % (
 			*data_range(gradient_x), *data_range(gradient_y), *data_range(gradient_mag)
 		))
 		gradient_data = np.stack((gradient_x, gradient_y), axis=-1)
 		gradient_img_bw, gradient_img_color = make_gradient_imgs(gradient_x=gradient_x, gradient_y=gradient_y, gradient_mag=gradient_mag)
-
-		prevailing_wind_img = None  # TODO
 
 		tprint('Making image')
 		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, rainfall_cm=rainfall_cm)
@@ -396,6 +406,7 @@ class Planet:
 		elevation_img = ELEVATION_CMAP(elevation_11 * 0.5 + 0.5)
 		temperature_img = TEMPERATURE_CMAP(temperature_01)
 		rainfall_img = RAINFALL_CMAP(rainfall_01)
+		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=latitude_range)
 
 		erosion_img = None
 		if erosion is not None:
@@ -421,7 +432,7 @@ class Planet:
 			equirectangular=equirectangular,
 			polar_azimuthal=polar_azimuthal,
 			views=views,
-			elevation_data=elevation_m,
+			elevation_data=topography_m,
 			elevation_img=elevation_img,
 			gradient_data=gradient_data,
 			gradient_img_bw=gradient_img_bw,
@@ -429,7 +440,8 @@ class Planet:
 			erosion_img=erosion_img,
 			temperature_C=temperature_C,
 			temperature_img=temperature_img,
-			prevailing_wind_img=prevailing_wind_img,
+			prevailing_wind_data=prevailing_wind_mps,
+			prevailing_wind_imgs=prevailing_wind_imgs,
 			rainfall_cm=rainfall_cm,
 			rainfall_img=rainfall_img,
 			water_data=water_mask,
@@ -485,11 +497,9 @@ def scale_elevation(elevation: np.ndarray, water_amount=0.5) -> np.ndarray:
 
 def make_latitude_map(width: int, height: int, latitude_range=(-90, 90), radians=False) -> np.ndarray:
 
-	latitude = np.linspace(latitude_range[1], latitude_range[0], num=height, endpoint=True)
+	# TODO: latitude_deg should only need to be 1D, we can always broadcast it
 
-	# TODO: try this instead (it will work here - just make sure it doesn't break anywhere else)
-	# latitude, step = np.linspace(latitude_range[1], latitude_range[0], num=height, endpoint=False, retstep=True)
-	# latitude += 0.5*step
+	latitude = linspace_midpoint(latitude_range[1], latitude_range[0], num=height)
 
 	latitude = latitude[..., np.newaxis]
 	latitude = np.repeat(latitude, repeats=width, axis=1)
@@ -500,29 +510,29 @@ def make_latitude_map(width: int, height: int, latitude_range=(-90, 90), radians
 
 def scale_temperature(
 		latitude_deg: np.ndarray,
-		elevation_m: np.ndarray,
+		topography_m: np.ndarray,
 		temperature_noise: np.ndarray,
 		ocean_turbulence: np.ndarray,
-		strength=0.75,
+		noise_strength=0.75,
 		turbulence_amount=5,
 		temperature_range_C=DEFAULT_TEMPERATURE_RANGE_C,
 		) -> np.ndarray:
 
-	require_same_shape(elevation_m, latitude_deg, temperature_noise, ocean_turbulence)
+	require_same_shape(topography_m, latitude_deg, temperature_noise, ocean_turbulence)
 
 	latitude = np.radians(latitude_deg)
 
 	latitude_turbulent = latitude + np.radians(turbulence_amount)*ocean_turbulence
 	latitude_turbulent = np.clip(latitude_turbulent, -np.pi/2, np.pi/2)
 
-	ocean_mask = elevation_m < 0
+	ocean_mask = topography_m < 0
 	land_mask = np.logical_not(ocean_mask)
 
 	# TODO: should this use domain warping instead of interpolation? or combination of both?
 	# TODO: much less variation over water, but crazier domain warping
 	latitude_temp_map = np.cos(2 * latitude) * 0.5 + 0.5
 
-	temperature_01 = temperature_noise * (1.0 - strength) + latitude_temp_map * strength
+	temperature_01 = temperature_noise * (1.0 - noise_strength) + latitude_temp_map * noise_strength
 
 	temperature_01[ocean_mask] = np.cos(2 * latitude_turbulent[ocean_mask]) * 0.5 + 0.5
 
@@ -531,7 +541,7 @@ def scale_temperature(
 	# temperature_01 *= elevation_temp_map
 
 	temperature_C = rescale(temperature_01, (0.0, 1.0), temperature_range_C)
-	temperature_C -= (DEGREES_C_COLDER_PER_KM_ELEVATION / 1000) * np.maximum(elevation_m, 0.0)
+	temperature_C -= (DEGREES_C_COLDER_PER_KM_ELEVATION / 1000) * np.maximum(topography_m, 0.0)
 
 	# temperature_C[ocean_mask] = np.maximum(temperature_C[ocean_mask], SEAWATER_FREEZING_POINT_C - 0.1)
 
@@ -566,8 +576,6 @@ def scale_rainfall(
 
 
 def debug_graph(water_amount):
-
-	# https://stackoverflow.com/questions/35355930/matplotlib-figure-to-image-as-a-numpy-array
 
 	# TODO: actual histograms of temp & rainfall by latitude
 	# also histograms of elevation & gradient
@@ -613,9 +621,39 @@ def debug_graph(water_amount):
 	ax.set_ylabel('Rainfall')
 	# ax.grid()
 
-	canvas.draw()
+	return matplotlib_figure_canvas_to_image(figure=fig, canvas=canvas)
 
-	return np.frombuffer(canvas.tostring_rgb(), dtype='uint8').reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+def _get_earth_topography(
+		width: int,
+		height: int,
+		) -> np.ndarray:
+
+	elevation_m = get_topography()
+
+	needs_resize = (elevation_m.shape != (height, width))
+
+	ELEVATION_DATA_RANGE: Final = (-8000., 6400.)
+
+	# Current generation model just uses elevation for ocean, so it can't handle land below sea level
+	# Set land minimum to slightly above sea level, ocean maximum to slightly below
+	min_land_elevation_m = 0.1
+
+	if needs_resize:
+		# Unfortunately, resize_array() loses a lot of data precision, so need a noticeable gap between
+		# (TODO: fix precision issues inside resize_array, then remove that part of this hack)
+		ELEVATION_STEP: Final = (ELEVATION_DATA_RANGE[1] - ELEVATION_DATA_RANGE[0]) / 255
+		min_land_elevation_m += 0.5 * ELEVATION_STEP
+
+	land_mask = get_mask(land=True, ocean=False, lakes=True)
+	ocean_mask = np.logical_not(land_mask)
+	elevation_m[land_mask] = np.maximum(elevation_m[land_mask], min_land_elevation_m)
+	elevation_m[ocean_mask] = np.minimum(elevation_m[ocean_mask], -min_land_elevation_m)
+
+	if needs_resize:
+		elevation_m = resize_array(elevation_m, (width, height), data_range=ELEVATION_DATA_RANGE)
+
+	return elevation_m
 
 
 def _generate(
@@ -632,6 +670,9 @@ def _generate(
 
 	tprint('Generating...', is_start=True)
 
+	noise_strength = params.noise_strength
+	use_noise = noise_strength > 0
+
 	elevation_steps = params.topography.elevation_steps
 	water_amount = params.topography.water_amount
 	base_frequency = 1.0 / params.topography.continent_size
@@ -643,48 +684,93 @@ def _generate(
 
 	# TODO: cache previous noise, and reuse if unchanged
 
+	tprint('Generating noise layers')
+
 	# TODO: octaves should also depend on lacunarity (lacunarity = log base)
 	max_resolution = max(width, height)
 	octaves = int(np.ceil( np.log2(max_resolution / base_frequency) ))
 	valley_octaves = int(np.ceil( np.log2(max_resolution / mountain_cell_base_frequency) ))
 
-	def _fbm(name: str, diff_steps=1, valley=False, **kwargs):
+	def _fbm(name: str, diff_steps=1, valley=False, noise_strength=noise_strength, **kwargs):
+
+		if noise_strength <= 0:
+			# TODO: do we want to return 0.5 for some noise types instead?
+			return np.zeros_like(latitude_deg)
+
 		if 'octaves' not in kwargs:
 			kwargs['octaves'] = octaves
 		kwargs['seed'] = (hash(name) + params.seed)
 		kwargs['normalize'] = True
 		if valley:
 			# TODO: pass in a valley function for the specific generator (i.e. use proper sphere noise!)
-			return valley_fbm(width=width, height=height, **kwargs)
+			return noise_strength * valley_fbm(width=width, height=height, **kwargs)
 		elif diff_steps == 0:
-			return fbm_func(**kwargs)
+			return noise_strength * fbm_func(**kwargs)
 		else:
-			return diff_fbm(diff_steps=diff_steps, fbm_func=fbm_func, **kwargs)
+			return noise_strength * diff_fbm(diff_steps=diff_steps, fbm_func=fbm_func, **kwargs)
 
-	tprint('Generating noise layers')
-
-	temperature_noise = _fbm('temperature') * 0.5 + 0.5
+	# Override noise_strength here, because it's used later in scale_temperature
+	temperature_noise = _fbm('temperature', noise_strength=(1.0 if noise_strength > 0 else 0.0)) * 0.5 + 0.5
 	rainfall = _fbm('rainfall') * 0.5 + 0.5
 
 	ocean_turbulence = _fbm('turbulence', base_frequency=4, gain=0.75)
 	# ocean_turbulence = _fbm('turbulence', diff_steps=3)
 
-	elevation = _fbm('elevation', diff_steps=elevation_steps, base_frequency=base_frequency)
-	# TODO: pass in fbm valley function as argument, for sphere noise
-	mountain_cells = _fbm('erosion_cells', valley=True, base_frequency=mountain_cell_base_frequency, octaves=valley_octaves)
+	mountain_cells = None
 
-	prevailing_wind = None  # TODO
+	if params.topography.use_earth:
+		tprint('Loading earth topography data')
+		topography_m = _get_earth_topography(width=width, height=height)
+		assert topography_m.shape == latitude_deg.shape
+		topopgraphy_norm = rescale(topography_m, (-8000., 8000.), (-1., 1.))
 
-	tprint('Scaling elevation/temperature/rainfall')
+	else:
+		topopgraphy_norm = _fbm('elevation', diff_steps=elevation_steps, base_frequency=base_frequency)
 
-	elevation = scale_elevation(elevation, water_amount=water_amount)
-	elevation_before_erosion = elevation
-	elevation = erode_mountain_cells(elevation, mountain_cells, erosion_amount=params.erosion.amount)
-	erosion = (elevation - elevation_before_erosion) / elevation
+		if params.erosion.amount > 0:
+			# TODO: pass in fbm valley function as argument, for sphere noise
+			mountain_cells = _fbm('erosion_cells', valley=True, base_frequency=mountain_cell_base_frequency, octaves=valley_octaves)
 
-	elevation_m = rescale(elevation, (-1., 1.), (-8000., 8000.))
+		tprint('Scaling elevation for water level')
 
-	temperature_C = scale_temperature(latitude_deg=latitude_deg, elevation_m=elevation_m, temperature_noise=temperature_noise, ocean_turbulence=ocean_turbulence, temperature_range_C=temperature_range_C)
+		topopgraphy_norm = scale_elevation(topopgraphy_norm, water_amount=water_amount)
+		topography_m = rescale(topopgraphy_norm, (-1., 1.), (-8000., 8000.))
+
+	if params.erosion.amount > 0 and not params.topography.use_earth:
+		tprint('Calculating erosion')
+
+		assert mountain_cells is not None
+
+		elevation_before_erosion = topopgraphy_norm
+		topopgraphy_norm = erode_mountain_cells(topopgraphy_norm, mountain_cells, erosion_amount=params.erosion.amount)
+		erosion = (topopgraphy_norm - elevation_before_erosion) / topopgraphy_norm
+		topography_m = rescale(topopgraphy_norm, (-1., 1.), (-8000., 8000.))
+	else:
+		erosion = np.zeros_like(topopgraphy_norm)
+
+	"""
+	TODO: Rainfall should affect erosion
+	i.e. calculate topography -> wind -> rainfall -> erosion -> re-calculate topography
+
+	2 iterations is probably plenty:
+	- Initial elevation estimates without erosion
+	- Calculate wind & rainfall from this elevation
+	- Apply erosion, scaled by rainfall
+	- Recalculate wind & rainfall with new eroded elevation
+	"""
+	# TODO: pass in some noise for domain warping
+	tprint('Calculating wind')
+	prevailing_wind_mps = make_prevailing_wind(latitude_deg=latitude_deg, topography_m=topography_m, flat=flat)
+
+	tprint('Scaling temperature/rainfall')
+	temperature_C = scale_temperature(
+		latitude_deg=latitude_deg,
+		topography_m=topography_m,
+		temperature_noise=temperature_noise,
+		ocean_turbulence=ocean_turbulence,
+		temperature_range_C=temperature_range_C,
+		noise_strength=(0.75*noise_strength),
+	)
 	rainfall_cm = scale_rainfall(rainfall, latitude_deg=latitude_deg)
 
 	tprint('Generating graphs')
@@ -694,10 +780,10 @@ def _generate(
 	tprint('Assembling data into planet...')
 	ret = Planet.make(
 		latitude_deg=latitude_deg,
-		elevation_m=elevation_m,
+		topography_m=topography_m,
 		erosion=erosion,
 		temperature_C=temperature_C,
-		prevailing_wind=prevailing_wind,
+		prevailing_wind_mps=prevailing_wind_mps,
 		rainfall_cm=rainfall_cm,
 		graph_figure=graph_figure,
 		flat=flat,
@@ -711,7 +797,7 @@ def _generate(
 
 def generate_flat_map(params: GeneratorParams, resolution: int) -> Planet:
 	width = resolution
-	height = resolution
+	height = (resolution // 2) if params.topography.use_earth else resolution
 
 	# TODO: latitude options
 	# TODO: option to always make it an island
@@ -752,8 +838,6 @@ def generate_planet_2d(params: GeneratorParams, resolution: int) -> Planet:
 def generate_planet_3d(params: GeneratorParams, resolution: int) -> Planet:
 	width = resolution
 	height = resolution // 2
-
-	
 
 	def fbm_func(**kwargs):
 		return sphere_fbm(height=height, **kwargs)

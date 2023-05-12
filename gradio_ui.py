@@ -39,6 +39,7 @@ def gradio_callback_map_generator(
 		generator: str,
 		seed: str,
 		resolution: int,
+		use_earth: bool,
 		water_amount: float,
 		continent_size: float,
 		elevation_steps: int,
@@ -68,6 +69,7 @@ def gradio_callback_map_generator(
 		generator=generator,
 		seed=seed,
 		topography=TopographyParams(
+			use_earth=use_earth,
 			elevation_steps=elevation_steps,
 			water_amount=water_amount,
 			continent_size=continent_size,
@@ -80,6 +82,7 @@ def gradio_callback_map_generator(
 			amount=erosion_amount,
 			cell_size=erosion_cell_size,
 		),
+		noise_strength=(0.0 if use_earth else 1.0),  # TODO: make this a slider?
 	)
 
 	print_str = str(params)
@@ -102,7 +105,7 @@ def gradio_callback_map_generator(
 		polar_azimuthal,
 		planet.biomes_img,
 		[planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color, planet.erosion_img],
-		[planet.temperature_img, planet.rainfall_img],
+		[planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs,
 		[planet.graph_figure],
 	)
 
@@ -120,11 +123,12 @@ def make_planet_generator_tab():
 				inputs += [
 					gr.Dropdown(choices=[generator.name for generator in GeneratorType], value=GeneratorType.planet_3d.name, label='Generator'),
 					gr.Number(precision=0, value=INITIAL_SEED, label='Seed'),
-					gr.Slider(32, 2048, step=32, value=512, label='Resolution'),
+					gr.Slider(64, 3600, step=16, value=512, label='Resolution (width)'),
 				]
 
 			with gr.Accordion('Topography'):
 				inputs += [
+					gr.Checkbox(value=False, label='Use Earth topography'),
 					gr.Slider(0, 100, step=5, value=70, label='Water amount'),
 					gr.Slider(5, 200, step=5, value=25, label='Continent size scale'),
 					gr.Slider(0, 8, step=1, value=0, label='Elevation difference steps'),
@@ -151,7 +155,7 @@ def make_planet_generator_tab():
 				gr.Image(label='Polar Azimuthal'),
 				gr.Image(label='Biomes'),
 				gr.Gallery(label='Elevation/Gradient/Erosion'),
-				gr.Gallery(label='Temperature & Precipitation'),
+				gr.Gallery(label='Temperature/Precipitation/Wind'),
 				gr.Gallery(label='Graphs'),
 			]
 
