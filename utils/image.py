@@ -2,7 +2,7 @@
 
 import colorsys
 from contextlib import contextmanager
-from math import ceil, isclose
+from math import ceil, floor, isclose, log2
 from numbers import Number
 from typing import Final, Optional, Tuple, Union, Literal
 import warnings
@@ -243,32 +243,23 @@ def alpha_to_nan(arr: np.ndarray, *, nan_thresh: Number = 0) -> np.ndarray:
 
 def resize_array(
 		arr: np.ndarray,
-		new_size: Tuple[int, int],
+		new_size: Tuple[int, int],  # TODO: change these to separate width & height arguments, so keywords should prvent getting dimensions swapped around
 		data_range: Optional[Tuple[float, float]] = None,
 		resampling = Image.BILINEAR,
-		# wrap_x = False,  # TODO: get this working
-		# wrap_y = False,  # TODO: get this working
-		internal_dtype = np.int32,
 		verbose = False,
 		) -> np.ndarray:
 	"""
 	:param new_size: in image dimensions, i.e. (width, height)
-
-	:note: Loses some data precision due to conversion to int32!
+	:param data_range: deprecated
 	"""
 
 	if len(arr.shape) not in [2, 3]:
 		raise ValueError(f'Array must have 2 or 3 dimensions (shape={arr.shape})')
 
+	input_dtype = arr.dtype
+
 	nan_mask = np.isnan(arr)
 	any_nan = nan_mask.any()
-
-	dtype_min_val = np.iinfo(internal_dtype).min
-	dtype_max_val = np.iinfo(internal_dtype).max
-
-	if data_range is None:
-		data_range = utils.numeric.data_range(arr)
-	arr = np.floor(rescale(arr, range_in=data_range, range_out=(dtype_min_val, dtype_max_val))).astype(internal_dtype)
 
 	mode = None
 	if any_nan:
@@ -288,24 +279,9 @@ def resize_array(
 
 	new_size = list(new_size)
 
-	# if wrap_x:
-	# 	arr = np.concatenate((arr, arr[:, :1, ...]), axis=1)
-	# 	new_size[0] += 1
-
-	# if wrap_y:
-	# 	arr = np.concatenate((arr, arr[:1, :, ...]), axis=0)
-	# 	new_size[1] += 1
-
 	im = Image.fromarray(arr, mode=mode)
 	im = im.resize(tuple(new_size), resample=resampling)
-	arr = np.asarray(im, dtype=float)
-
-	# if wrap_x and wrap_y:
-	# 	arr = arr[:-1, :-1, ...]
-	# elif wrap_y:
-	# 	arr = arr[:-1, :, ...]
-	# elif wrap_x:
-	# 	arr = arr[:, :-1, ...]
+	arr = np.asarray(im, dtype=input_dtype)
 
 	if any_nan:
 		if verbose:
@@ -317,8 +293,6 @@ def resize_array(
 
 	if len(arr.shape) == 3 and arr.shape[2] == 1:
 		arr = arr.reshape((arr.shape[0], arr.shape[1]))
-
-	rescale(arr, range_in=(dtype_min_val, dtype_max_val), range_out=data_range, in_place=True)
 
 	return arr
 
@@ -827,6 +801,8 @@ def gaussian_blur_map(
 		latitude_span: float = 180,
 		min_sigma_px: float = 0.5,
 		truncate = 4.0,
+		resize: Literal[False, 'internal', True] = 'internal',
+		resize_target_sigma_px = 8.0,
 		) -> np.ndarray:
 	"""
 	Gaussian blur map at Earth scale
@@ -837,9 +813,15 @@ def gaussian_blur_map(
 	:param latitude_span: Latitude range covered by map. Must be 180 if not flat_map
 	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
 	:param truncate: How many sigma to truncate kernel
+	:param resize: Allow resizing when sigma is large.
+		False: Always process blur at full resolution.
+		'internal': Downscale, blur, and upscale back to original resolution. Can be much faster, but slightly lower quality
+		True: Downscale & blur, and return lower-resolution image
+	:param resize_target_sigma_px: Target sigma (in pixels) for internal resize. Lower = faster, but lower quality
 	"""
 
-	# TODO: option to auto resize if sigma is large
+	resize_before = bool(resize)
+	resize_after = (resize.lower() == 'internal')
 
 	if isclose(latitude_span, 180):
 		latitude_span = 180
@@ -847,13 +829,41 @@ def gaussian_blur_map(
 	if (not flat_map) and latitude_span != 180:
 		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
 
-	im_height = map_im.shape[0]
+	height, width = map_im.shape[0], map_im.shape[1]
 
-	sigma = im_height * (sigma_km / EARTH_POLAR_CIRCUMFERENCE_KM) * (360 / latitude_span)
+	sigma = height * (sigma_km / EARTH_POLAR_CIRCUMFERENCE_KM) * (360 / latitude_span)
 
+	scale = 1
+	internal_size = (width, height)
+	if resize_before:
+		max_scale = min(width, height)
+		# TODO: floor to nearest divisor of image width & height, not necessarily power of 2
+		scale = 2 ** floor(log2(sigma / resize_target_sigma_px))
+		scale = min(scale, max_scale)
+
+		if scale <= 2:
+			# Don't bother - it's probably not worth the extra computation to perform the resize
+			scale = 1
+
+	internal_size = (width // scale, height // scale)
+
+	if scale > 1:
+		sigma /= scale
+		blur_input = resize_array(map_im, new_size=internal_size)
+	else:
+		blur_input = map_im
+
+	# TODO optimization: resize X per sphere_gaussian_blur latitude section instead of entire image
 	blur_func = gaussian_blur if flat_map else sphere_gaussian_blur
+	blurred = blur_func(blur_input, sigma=sigma, truncate=truncate, min_sigma_px=min_sigma_px)
 
-	return blur_func(map_im, sigma=sigma, truncate=truncate, min_sigma_px=min_sigma_px)
+	if resize_after and scale > 1:
+		out = resize_array(blurred, new_size=(width, height))
+		assert out.shape == map_im.shape
+	else:
+		out = blurred
+
+	return out
 
 
 def map_gradient(
@@ -866,8 +876,10 @@ def map_gradient(
 		sigma_km: float = 0.0,
 		min_sigma_px: float = 0.5,
 		truncate = 4.0,
-		sobel=False,
-		large_sobel=False,
+		resize: Literal[False, 'internal', True] = 'internal',
+		resize_target_sigma_px = 8.0,
+		sobel = False,
+		large_sobel = False,
 		**gradient_kwargs,
 		) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
 	"""
@@ -880,11 +892,14 @@ def map_gradient(
 	:param sigma_km: Gaussian blur size
 	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
 	:param truncate: How many sigma to truncate Gaussian blur kernel
+	:param resize: Allow resizing when sigma is large.
+		False: Always process blur at full resolution.
+		'internal': Downscale, blur, and upscale back to original resolution. Can be much faster, but slightly lower quality
+		True: Downscale & blur, and return lower-resolution image
+	:param resize_target_sigma_px: Target sigma (in pixels) for internal resize. Lower = faster, but lower quality
 	:param sobel: Use 3x3 Sobel operators for gradient
 	:param large_sobel: Use 5x5 Sobel operators for gradient
 	"""
-
-	# TODO: option to auto resize if sigma is large
 
 	if isclose(latitude_span, 180):
 		latitude_span = 180
@@ -892,9 +907,8 @@ def map_gradient(
 	if (not flat_map) and latitude_span != 180:
 		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
 
-	im_height = map_im.shape[0]
-
 	if sigma_km > 0:
+		# TODO: with allow_internal_resize, can leave at low resolution for calculating gradient
 		map_im_blurred = gaussian_blur_map(
 			map_im,
 			sigma_km=sigma_km,
@@ -902,6 +916,8 @@ def map_gradient(
 			latitude_span=latitude_span,
 			min_sigma_px=min_sigma_px,
 			truncate=truncate,
+			resize=bool(resize),
+			resize_target_sigma_px=resize_target_sigma_px,
 		)
 	else:
 		map_im_blurred = map_im
@@ -911,10 +927,19 @@ def map_gradient(
 	gradient_kwargs['large_sobel'] = large_sobel
 
 	if flat_map:
-		d_step_m = (latitude_span * EARTH_POLAR_CIRCUMFERENCE_M) / (360 * im_height)
-		return gradient(map_im_blurred, d_step=d_step_m, **gradient_kwargs)
+		d_step_m = (latitude_span * EARTH_POLAR_CIRCUMFERENCE_M) / (360 * map_im_blurred.shape[0])
+		ret = gradient(map_im_blurred, d_step=d_step_m, **gradient_kwargs)
 	else:
-		return sphere_gradient(map_im_blurred, scale_earth=True, **gradient_kwargs)
+		ret = sphere_gradient(map_im_blurred, scale_earth=True, **gradient_kwargs)
+
+	if resize in [False, 'internal'] and map_im_blurred.shape != map_im.shape:
+		if isinstance(ret, np.ndarray):
+			ret = resize_array(ret, (map_im.shape[1], map_im.shape[0]))
+		else:
+			assert isinstance(ret, tuple)
+			ret = tuple([resize_array(r, (map_im.shape[1], map_im.shape[0])) for r in ret])
+
+	return ret
 
 
 def divergence(*, x: np.ndarray, y: np.ndarray, d_step: Optional[float]=None):

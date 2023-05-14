@@ -170,14 +170,16 @@ class WindSimulation:
 	@cached_property
 	def land_blur(self) -> np.ndarray:
 		land = self.land_mask.astype(self._dtype)
-		blurred = gaussian_blur_map(land, sigma_km=1000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
-		blurred += gaussian_blur_map(land, sigma_km=10000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
-		blurred *= 0.5
-		return blurred
+		return gaussian_blur_map(land, sigma_km=1000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
+
+	@cached_property
+	def land_blur_large(self) -> np.ndarray:
+		land = self.land_mask.astype(self._dtype)
+		return gaussian_blur_map(land, sigma_km=10000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
 
 	@cached_property
 	def hill_map(self) -> np.ndarray:
-		return HILL_MAP_ELEVATION_SCALE * self.elevation_blur + HILL_MAP_LAND_SCALE * self.land_blur
+		return HILL_MAP_ELEVATION_SCALE * self.elevation_blur + HILL_MAP_LAND_SCALE * 0.5 * (self.land_blur + self.land_blur_large)
 
 	@cached_property
 	def hill_gradients(self) -> tuple[np.ndarray, np.ndarray]:
@@ -209,6 +211,7 @@ class WindSimulation:
 		del self.elevation_m
 		del self.elevation_blur
 		del self.land_blur
+		del self.land_blur_large
 		del self.hill_map
 		del self.hill_gradients
 		del self.hill_gradients_clipped
@@ -221,9 +224,14 @@ class WindSimulation:
 		:returns: (wind X, wind Y) in meters per second
 		"""
 
+		tprint("Making base winds")
 		self._make_base_winds()
+		tprint("Scaling wind magnitude for land")
 		self._scale_magnitude_for_land()
+		tprint("Bending wind direction for elevation")
 		self._bend_direction_for_elevation()
+
+		tprint("Calculating final wind")
 
 		assert self._magnitude_mps is not None
 		assert self._dir_unit_x is not None
