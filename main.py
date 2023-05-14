@@ -30,8 +30,8 @@ def main():
 		generation.winds.main(args)
 
 	parser = argparse.ArgumentParser()
-
-	subparsers = parser.add_subparsers(required=True)
+	parser.set_defaults(main=_run_main)
+	subparsers = parser.add_subparsers(required=False)
 
 	run_parser = subparsers.add_parser('run', add_help=False, help="Run Gradio UI")
 	run_parser.set_defaults(main=_run_main)

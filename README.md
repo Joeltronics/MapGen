@@ -80,9 +80,6 @@ Other TODO items:
 ### Engine & Performance
 
 * Generate different views directly from data, instead of generating equirectangular projection and remapping
-* Some Gradio performance issues
-	* By default it base64 encodes images, which adds a lot of overhead when we have lots of large images
-	* Lots of possible ways to improve this - save to a file and link that instead; or use gradio Gallery objects everywhere
 * Cache noise to reuse it
 	* e.g. if re-generating the same seed with a few different parameters or higher resolution
 * Use more pyfastnoisesimd features

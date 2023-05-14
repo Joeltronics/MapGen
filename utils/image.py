@@ -823,7 +823,7 @@ def gaussian_blur_map(
 		/,
 		sigma_km: float,
 		*,
-		flat: bool,
+		flat_map: bool,
 		latitude_span: float = 180,
 		min_sigma_px: float = 0.5,
 		truncate = 4.0,
@@ -833,8 +833,8 @@ def gaussian_blur_map(
 
 	:param map_im: Map image to blur
 	:param sigma_km: Gaussian blur size
-	:param flat: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
-	:param latitude_span: Latitude range covered by map. Must be 180 if not flat
+	:param flat_map: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
+	:param latitude_span: Latitude range covered by map. Must be 180 if not flat_map
 	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
 	:param truncate: How many sigma to truncate kernel
 	"""
@@ -844,14 +844,14 @@ def gaussian_blur_map(
 	if isclose(latitude_span, 180):
 		latitude_span = 180
 
-	if (not flat) and latitude_span != 180:
+	if (not flat_map) and latitude_span != 180:
 		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
 
 	im_height = map_im.shape[0]
 
 	sigma = im_height * (sigma_km / EARTH_POLAR_CIRCUMFERENCE_KM) * (360 / latitude_span)
 
-	blur_func = gaussian_blur if flat else sphere_gaussian_blur
+	blur_func = gaussian_blur if flat_map else sphere_gaussian_blur
 
 	return blur_func(map_im, sigma=sigma, truncate=truncate, min_sigma_px=min_sigma_px)
 
@@ -859,7 +859,7 @@ def gaussian_blur_map(
 def map_gradient(
 		map_im: np.ndarray,
 		/,
-		flat: bool,
+		flat_map: bool,
 		*,
 		magnitude: bool = False,
 		latitude_span: float = 180.0,
@@ -874,9 +874,9 @@ def map_gradient(
 	Calculate gradient of map at Earth scale
 
 	:param map_im: Map image to calculate gradient. Data is assumed to be in meters.
-	:param flat: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
+	:param flat_map: if True, map is treated as flat 2D; if False, map is equirectangular projection of full sphere
 	:param magnitude: if True, return magnitude; otherwise return (x, y)
-	:param latitude_span: Latitude range covered by map. Must be 180 if not flat
+	:param latitude_span: Latitude range covered by map. Must be 180 if not flat_map
 	:param sigma_km: Gaussian blur size
 	:param min_sigma_px: If sigma is fewer than this many pixels at any particular latitude, skip blur
 	:param truncate: How many sigma to truncate Gaussian blur kernel
@@ -889,7 +889,7 @@ def map_gradient(
 	if isclose(latitude_span, 180):
 		latitude_span = 180
 
-	if (not flat) and latitude_span != 180:
+	if (not flat_map) and latitude_span != 180:
 		raise ValueError(f'latitude_span must be 180 for non-flat map ({latitude_span=})')
 
 	im_height = map_im.shape[0]
@@ -898,7 +898,7 @@ def map_gradient(
 		map_im_blurred = gaussian_blur_map(
 			map_im,
 			sigma_km=sigma_km,
-			flat=flat,
+			flat_map=flat_map,
 			latitude_span=latitude_span,
 			min_sigma_px=min_sigma_px,
 			truncate=truncate,
@@ -910,7 +910,7 @@ def map_gradient(
 	gradient_kwargs['sobel'] = sobel
 	gradient_kwargs['large_sobel'] = large_sobel
 
-	if flat:
+	if flat_map:
 		d_step_m = (latitude_span * EARTH_POLAR_CIRCUMFERENCE_M) / (360 * im_height)
 		return gradient(map_im_blurred, d_step=d_step_m, **gradient_kwargs)
 	else:

@@ -12,12 +12,11 @@ import numpy as np
 import scipy.interpolate
 import scipy.ndimage
 
-from utils.numeric import \
-	require_same_shape, rescale, data_range, max_abs, linspace_midpoint, magnitude, clip_max_vector_magnitude
+from .generation_utils import make_latitude_map
+
+from utils.numeric import rescale, data_range, linspace_midpoint, magnitude, clip_max_vector_magnitude
 from utils.image import \
-	matplotlib_figure_canvas_to_image, resize_array, float_to_uint8, \
-	map_gradient, gaussian_blur_map, divergence, sphere_divergence
-from utils.consts import PI, TWOPI, EARTH_POLAR_CIRCUMFERENCE_M, EARTH_EQUATORIAL_CIRCUMFERENCE_M
+	matplotlib_figure_canvas_to_image, resize_array, map_gradient, gaussian_blur_map, divergence, sphere_divergence
 from utils.utils import tprint
 
 
@@ -87,23 +86,21 @@ class WindSimulation:
 	def __init__(
 			self,
 			topography_m: np.ndarray,
-			latitude_deg: np.ndarray,  # TODO: make this able to be specified as a range instead
-			flat: bool):
+			latitude_range_deg: tuple[float, float],
+			flat_map: bool):
 
+		self._height, self._width = topography_m.shape
 		self._dtype = topography_m.dtype
 
 		self._topography_m = topography_m
-		self._latitude_deg = latitude_deg
-		self._flat = flat
 
-		latitude_range = data_range(latitude_deg)
-		latitude_step = abs(latitude_deg[1, 0] - latitude_deg[0, 0])
-		self._latitude_range = (latitude_range[0] - 0.5*latitude_step, latitude_range[1] + 0.5*latitude_step)
+		self._flat = flat_map
 
+		self._latitude_range = sorted(latitude_range_deg)
 		self._latitude_span = self._latitude_range[1] - self._latitude_range[0]
-		assert self._latitude_span >= 0
 		if self._latitude_span == 0:
 			raise ValueError('Map must span non-zero latitude')
+		assert self._latitude_span > 0
 
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
@@ -120,10 +117,6 @@ class WindSimulation:
 		return self._topography_m
 
 	@property
-	def latitude_deg(self) -> np.ndarray:
-		return self._latitude_deg
-
-	@property
 	def latitude_range_deg(self) -> tuple[float, float]:
 		return self._latitude_range
 
@@ -132,11 +125,15 @@ class WindSimulation:
 		return self._latitude_span
 
 	@property
-	def flat(self) -> bool:
+	def flat_map(self) -> bool:
 		return self._flat
 
 	# Non-simple & cached properties
 	# TODO: not all of these need to be cached, for the sake of saving memory
+
+	@cached_property
+	def latitude_deg(self) -> np.ndarray:
+		return make_latitude_map(height=self._height, width=1, latitude_range=self._latitude_range)
 
 	@property
 	def base_magnitude_mps(self) -> np.ndarray:
@@ -168,13 +165,13 @@ class WindSimulation:
 
 	@cached_property
 	def elevation_blur(self) -> np.ndarray:
-		return gaussian_blur_map(self.elevation_m, sigma_km=100.0, flat=self.flat, latitude_span=self.latitude_span_deg)
+		return gaussian_blur_map(self.elevation_m, sigma_km=100.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
 
 	@cached_property
 	def land_blur(self) -> np.ndarray:
 		land = self.land_mask.astype(self._dtype)
-		blurred = gaussian_blur_map(land, sigma_km=1000.0, flat=self.flat, latitude_span=self.latitude_span_deg)
-		blurred += gaussian_blur_map(land, sigma_km=10000.0, flat=self.flat, latitude_span=self.latitude_span_deg)
+		blurred = gaussian_blur_map(land, sigma_km=1000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
+		blurred += gaussian_blur_map(land, sigma_km=10000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
 		blurred *= 0.5
 		return blurred
 
@@ -186,7 +183,7 @@ class WindSimulation:
 	def hill_gradients(self) -> tuple[np.ndarray, np.ndarray]:
 		return map_gradient(
 			self.hill_map * HILL_MAP_GRADIENT_SCALE,
-			flat=self.flat,
+			flat_map=self.flat_map,
 			latitude_span=self.latitude_span_deg,
 		)
 
@@ -207,6 +204,7 @@ class WindSimulation:
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
+		del self.latitude_deg
 		del self.land_mask
 		del self.elevation_m
 		del self.elevation_blur
@@ -243,8 +241,6 @@ class WindSimulation:
 
 		assert all(val is None for val in [self._base_magnitude_mps, self._base_dir_unit_x, self._base_dir_unit_y])
 
-		# TODO: latitude only really needs to be 1D array
-
 		latitude_deg = self.latitude_deg
 
 		southern = (latitude_deg < 0)
@@ -257,6 +253,10 @@ class WindSimulation:
 		dir_unit_y = np.sin(wind_direction)
 
 		dir_unit_y[southern] = -dir_unit_y[southern]
+
+		magnitude_mps = np.repeat(magnitude_mps, repeats=self._width, axis=1)
+		dir_unit_x = np.repeat(dir_unit_x, repeats=self._width, axis=1)
+		dir_unit_y = np.repeat(dir_unit_y, repeats=self._width, axis=1)
 
 		self._base_magnitude_mps = magnitude_mps
 		self._base_dir_unit_x = dir_unit_x
@@ -342,11 +342,11 @@ class WindSimulation:
 		self._dir_unit_y = dir_unit_y
 
 
-def make_prevailing_wind(latitude_deg: np.ndarray, topography_m: np.ndarray, flat=False) -> tuple[np.ndarray, np.ndarray]:
+def make_prevailing_wind(topography_m: np.ndarray, latitude_range_deg: tuple[float, float], flat_map=False) -> tuple[np.ndarray, np.ndarray]:
 	"""
 	:returns: (prevailing wind x, prevailing wind y), in meters/second
 	"""
-	sim = WindSimulation(topography_m=topography_m, latitude_deg=latitude_deg, flat=flat)
+	sim = WindSimulation(topography_m=topography_m, latitude_range_deg=latitude_range_deg, flat_map=flat_map)
 	return sim.process()
 
 
@@ -530,7 +530,7 @@ def main(args=None):
 			dict(
 				title=f'Earth, {earth_topography_m.shape[1]}x{earth_topography_m.shape[0]}',
 				source_data=earth_topography_m,
-				flat=False,
+				flat_map=False,
 				high_res_arrows=True,
 			)
 		]
@@ -541,26 +541,26 @@ def main(args=None):
 				title='Earth, 1024x512',
 				source_data=earth_topography_m,
 				resolution=(512, 1024),
-				flat=False,
+				flat_map=False,
 			),
 			dict(
 				title='Earth, 256x128',
 				source_data=earth_topography_m,
 				resolution=(128, 256),
-				flat=False,
+				flat_map=False,
 			),
 			dict(
 				title='Earth, 1024x512, flat',
 				source_data=earth_topography_m,
 				resolution=(512, 1024),
-				flat=True,
+				flat_map=True,
 			),
 			dict(
 				title='North America (flat)',
 				source_data=na_topography_m,
 				latitude_range=na_lat_range,
 				longitude_range=na_lon_range,
-				flat=True,
+				flat_map=True,
 			),
 		]
 	
@@ -569,7 +569,7 @@ def main(args=None):
 			title='Circle test',
 			source_data=circle_data,
 			latitude_range=circle_data_latitude_range,
-			flat=True,
+			flat_map=True,
 		),
 	]
 
@@ -584,7 +584,7 @@ def main(args=None):
 		if resolution is None:
 			resolution = source_data.shape
 		height, width = resolution
-		flat = dataset['flat']
+		flat_map = dataset['flat_map']
 
 		high_res_arrows = dataset.get('high_res_arrows', False)
 
@@ -607,11 +607,7 @@ def main(args=None):
 
 		tprint('Calculating wind')
 
-		latitude_deg = linspace_midpoint(latitude_range[1], latitude_range[0], height)
-		latitude_deg = latitude_deg[..., np.newaxis]
-		latitude_deg = np.repeat(latitude_deg, repeats=width, axis=1)
-
-		sim = WindSimulation(topography_m=topography_m, latitude_deg=latitude_deg, flat=flat)
+		sim = WindSimulation(topography_m=topography_m, latitude_range_deg=latitude_range, flat_map=flat_map)
 		wind_x, wind_y = sim.process(keep_cache=True)
 
 		wind_mag = magnitude(wind_x, wind_y)
@@ -620,7 +616,7 @@ def main(args=None):
 
 		tprint('Calculating divergence')
 
-		div_func = divergence if flat else sphere_divergence
+		div_func = divergence if flat_map else sphere_divergence
 
 		div = div_func(x=wind_x, y=wind_y)
 		div_norm = div_func(x=wind_x_norm, y=wind_y_norm)

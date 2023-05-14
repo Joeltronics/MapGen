@@ -100,10 +100,10 @@ def gradio_callback_map_generator(
 
 	return (
 		print_str,
-		planet.equirectangular,
+		[planet.equirectangular],
 		planet.views,
-		polar_azimuthal,
-		planet.biomes_img,
+		[polar_azimuthal],
+		[planet.biomes_img],
 		[planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color, planet.erosion_img],
 		[planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs,
 		[planet.graph_figure],
@@ -150,10 +150,10 @@ def make_planet_generator_tab():
 			gr.Label('Outputs')
 			outputs += [
 				gr.Textbox(),
-				gr.Image(label='Equirectangular'),
+				gr.Gallery(label='Equirectangular'),
 				gr.Gallery(label='Planet Views'),
-				gr.Image(label='Polar Azimuthal'),
-				gr.Image(label='Biomes'),
+				gr.Gallery(label='Polar Azimuthal'),
+				gr.Gallery(label='Biomes'),
 				gr.Gallery(label='Elevation/Gradient/Erosion'),
 				gr.Gallery(label='Temperature/Precipitation/Wind'),
 				gr.Gallery(label='Graphs'),
