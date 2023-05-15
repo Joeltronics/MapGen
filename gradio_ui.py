@@ -142,8 +142,8 @@ def make_planet_generator_tab():
 
 			with gr.Accordion('Erosion'):
 				inputs += [
-					gr.Slider(0, 100, step=5, value=50, label='Amount'),
-					gr.Slider(0, 25, step=0.25, value=2, label='Cell size'),
+					gr.Slider(0, 100, step=5, value=75, label='Amount'),
+					gr.Slider(0, 25, step=0.25, value=1, label='Cell size'),
 				]
 
 		with gr.Column():

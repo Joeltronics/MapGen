@@ -104,8 +104,11 @@ def erode(
 	assert np.amax(valley_noise) <= 1
 
 	erosion = 1.0 - valley_noise
+	erosion = np.square(1.0 - valley_noise)
 
-	amount = rescale(topography_norm, (0.1, 1.0), (0.0, amount), clip=True)
+	# TODO: should there be some erosion right down to sea level too?
+
+	amount = rescale(topography_norm, (0.05, 1.0), (0.0, amount), clip=True)
 	return topography_norm - amount * erosion
 
 
