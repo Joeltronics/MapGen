@@ -2,6 +2,7 @@
 
 
 from datetime import datetime
+from hashlib import md5
 
 
 _start_time = None
@@ -31,3 +32,11 @@ def tprint(s: str, start=None, is_start=False, **kwargs):
 		s = f'[{now_str}] {s}'
 	print(s)
 	return now
+
+
+def md5_hash(val: str | bytes) -> int:
+
+	if isinstance(val, str):
+		val = val.encode('utf-8')
+
+	return int.from_bytes(md5(val).digest(), 'big')

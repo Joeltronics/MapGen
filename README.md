@@ -86,11 +86,6 @@ Other TODO items:
 
 ### Known Bugs & Problems
 
-* Same seed can give totally different results
-	* It seems to give the same results within a run, but if you exit and rerun, it will give completely different results
-	* Not sure if this is a bug in pyfastnoisesimd, or if I'm using it wrong - haven't really looked into this yet
 * There seems to be a "shadow" to the right side of land
 	* Most noticeable in the biome map, but I think it's in the main map as well (unless this is just gradient shading?)
 	* Might be an X off by one error somewhere (ocean mask generation?)
-* Gradient calculation has issues
-	* This doesn't end up mattering because we just normalize to [-1, 1], but would like to fix this

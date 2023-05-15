@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum, unique
-from pathlib import Path
 from typing import List, Optional, Tuple, Literal, Final
 
 from matplotlib.backends.backend_agg import FigureCanvas
@@ -24,7 +23,7 @@ from .winds import make_prevailing_wind, make_prevailing_wind_imgs
 from utils.image import float_to_uint8, remap, matplotlib_figure_canvas_to_image, map_gradient
 from utils.map_projection import make_projection_map
 from utils.numeric import data_range, rescale, max_abs
-from utils.utils import tprint
+from utils.utils import tprint, md5_hash
 
 
 """
@@ -400,7 +399,7 @@ def _generate(
 
 		if 'octaves' not in kwargs:
 			kwargs['octaves'] = octaves
-		kwargs['seed'] = (hash(name) + params.seed)
+		kwargs['seed'] = md5_hash(name) + params.seed
 		kwargs['normalize'] = True
 		if valley:
 			# TODO: pass in a valley function for the specific generator (i.e. use proper sphere noise!)

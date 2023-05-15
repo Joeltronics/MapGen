@@ -216,8 +216,8 @@ class FractalNoise:
 		if self.fns is not None:
 			return
 
-		# TODO: seed seems it gets randomized per Python run
-		self.fns = fns.Noise(seed=np.int64(self.seed))
+		seed = np.uint64(self.seed % (2 ** 64))
+		self.fns = fns.Noise(seed=seed)
 
 		self.fns.frequency = self.base_frequency
 		self.fns.fractal.octaves = self.octaves
