@@ -12,7 +12,8 @@ import numpy as np
 import scipy.interpolate
 import scipy.ndimage
 
-from .generation_utils import make_latitude_map
+from .map_properties import MapProperties
+from .topography import Terrain
 
 from utils.numeric import rescale, data_range, linspace_midpoint, magnitude, clip_max_vector_magnitude
 from utils.image import \
@@ -85,22 +86,18 @@ HILL_MAP_GRADIENT_SCALE: Final = 1e6
 class WindSimulation:
 	def __init__(
 			self,
-			topography_m: np.ndarray,
-			latitude_range_deg: tuple[float, float],
-			flat_map: bool):
+			map_properties: MapProperties,
+			# topography_m: np.ndarray
+			terrain: Terrain,
+			):
 
-		self._height, self._width = topography_m.shape
-		self._dtype = topography_m.dtype
+		self._map_properties = map_properties
+		self._terrain = terrain
 
-		self._topography_m = topography_m
+		self._height = map_properties.height
+		self._width = map_properties.width
 
-		self._flat = flat_map
-
-		self._latitude_range = sorted(latitude_range_deg)
-		self._latitude_span = self._latitude_range[1] - self._latitude_range[0]
-		if self._latitude_span == 0:
-			raise ValueError('Map must span non-zero latitude')
-		assert self._latitude_span > 0
+		self._dtype = terrain.terrain_m.dtype
 
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
@@ -110,30 +107,7 @@ class WindSimulation:
 		self._dir_unit_x = None
 		self._dir_unit_y = None
 
-	# Simple getter properties
-
-	@property
-	def topography_m(self) -> np.ndarray:
-		return self._topography_m
-
-	@property
-	def latitude_range_deg(self) -> tuple[float, float]:
-		return self._latitude_range
-
-	@property
-	def latitude_span_deg(self) -> float:
-		return self._latitude_span
-
-	@property
-	def flat_map(self) -> bool:
-		return self._flat
-
-	# Non-simple & cached properties
-	# TODO: not all of these need to be cached, for the sake of saving memory
-
-	@cached_property
-	def latitude_deg(self) -> np.ndarray:
-		return make_latitude_map(height=self._height, width=1, latitude_range=self._latitude_range)
+	# Computed properties
 
 	@property
 	def base_magnitude_mps(self) -> np.ndarray:
@@ -156,37 +130,25 @@ class WindSimulation:
 		return mag * unit_x, mag * unit_y
 
 	@cached_property
-	def land_mask(self) -> np.ndarray:
-		return self._topography_m >= 0
-
-	@cached_property
-	def elevation_m(self) -> np.ndarray:
-		return np.maximum(0.0, self._topography_m)
-
-	@cached_property
-	def elevation_blur(self) -> np.ndarray:
-		return gaussian_blur_map(self.elevation_m, sigma_km=100.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
-
-	@cached_property
 	def land_blur(self) -> np.ndarray:
-		land = self.land_mask.astype(self._dtype)
-		return gaussian_blur_map(land, sigma_km=1000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
+		land = self._terrain.land_mask.astype(self._dtype)
+		return gaussian_blur_map(land, sigma_km=1000.0, flat_map=self._map_properties.flat, latitude_span=self._map_properties.latitude_span)
 
 	@cached_property
 	def land_blur_large(self) -> np.ndarray:
-		land = self.land_mask.astype(self._dtype)
-		return gaussian_blur_map(land, sigma_km=10000.0, flat_map=self.flat_map, latitude_span=self.latitude_span_deg)
+		land = self._terrain.land_mask.astype(self._dtype)
+		return gaussian_blur_map(land, sigma_km=10000.0, flat_map=self._map_properties.flat, latitude_span=self._map_properties.latitude_span)
 
 	@cached_property
 	def hill_map(self) -> np.ndarray:
-		return HILL_MAP_ELEVATION_SCALE * self.elevation_blur + HILL_MAP_LAND_SCALE * 0.5 * (self.land_blur + self.land_blur_large)
+		return HILL_MAP_ELEVATION_SCALE * self._terrain.elevation_100km + HILL_MAP_LAND_SCALE * 0.5 * (self.land_blur + self.land_blur_large)
 
 	@cached_property
 	def hill_gradients(self) -> tuple[np.ndarray, np.ndarray]:
 		return map_gradient(
 			self.hill_map * HILL_MAP_GRADIENT_SCALE,
-			flat_map=self.flat_map,
-			latitude_span=self.latitude_span_deg,
+			flat_map=self._map_properties.flat,
+			latitude_span=self._map_properties.latitude_span,
 		)
 
 	@cached_property
@@ -206,10 +168,6 @@ class WindSimulation:
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
-		del self.latitude_deg
-		del self.land_mask
-		del self.elevation_m
-		del self.elevation_blur
 		del self.land_blur
 		del self.land_blur_large
 		del self.hill_map
@@ -249,7 +207,7 @@ class WindSimulation:
 
 		assert all(val is None for val in [self._base_magnitude_mps, self._base_dir_unit_x, self._base_dir_unit_y])
 
-		latitude_deg = self.latitude_deg
+		latitude_deg = self._map_properties.latitude_column
 
 		southern = (latitude_deg < 0)
 		abs_latitude_deg = np.abs(latitude_deg)
@@ -350,15 +308,8 @@ class WindSimulation:
 		self._dir_unit_y = dir_unit_y
 
 
-def make_prevailing_wind(topography_m: np.ndarray, latitude_range_deg: tuple[float, float], flat_map=False) -> tuple[np.ndarray, np.ndarray]:
-	"""
-	:returns: (prevailing wind x, prevailing wind y), in meters/second
-	"""
-	sim = WindSimulation(topography_m=topography_m, latitude_range_deg=latitude_range_deg, flat_map=flat_map)
-	return sim.process()
-
-
 def make_prevailing_wind_imgs(
+		# TODO: take in WindSimulation instead (or make this a member)
 		prevailing_wind_mps: tuple[np.ndarray, np.ndarray],
 		latitude_range: tuple[float, float],
 		) -> list[np.ndarray]:
@@ -592,20 +543,18 @@ def main(args=None):
 		if resolution is None:
 			resolution = source_data.shape
 		height, width = resolution
-		flat_map = dataset['flat_map']
 
 		high_res_arrows = dataset.get('high_res_arrows', False)
 
-		latitude_range = dataset.get('latitude_range', (-90, 90))
-		assert latitude_range[1] > latitude_range[0]
-
-		longitude_range = dataset.get('longitude_range', None)
-		latitude_span = latitude_range[1] - latitude_range[0]
-		if longitude_range is None:
-			latitude_span = latitude_range[1] - latitude_range[0]
-			longitude_span = latitude_span * width / height
-			longitude_range = (-0.5*longitude_span, 0.5*longitude_span)
-		assert longitude_range[1] > longitude_range[0]
+		map_properties = MapProperties(
+			flat=dataset['flat_map'],
+			height=height,
+			width=width,
+			latitude_range=dataset.get('latitude_range', (-90, 90)),
+			longitude_range=dataset.get('longitude_range', None),
+		)
+		latitude_range = map_properties.latitude_range
+		longitude_range = map_properties.longitude_range
 
 		if resolution != source_data.shape:
 			tprint(f'Resizing {source_data.shape[1]}x{source_data.shape[0]} -> {width}x{height}...')
@@ -613,9 +562,13 @@ def main(args=None):
 		else:
 			topography_m = source_data
 
+		assert topography_m.shape == (height, width)
+
+		terrain = Terrain(map_properties=map_properties, terrain_m=topography_m)
+
 		tprint('Calculating wind')
 
-		sim = WindSimulation(topography_m=topography_m, latitude_range_deg=latitude_range, flat_map=flat_map)
+		sim = WindSimulation(map_properties=map_properties, terrain=terrain)
 		wind_x, wind_y = sim.process(keep_cache=True)
 
 		wind_mag = magnitude(wind_x, wind_y)
@@ -624,7 +577,7 @@ def main(args=None):
 
 		tprint('Calculating divergence')
 
-		div_func = divergence if flat_map else sphere_divergence
+		div_func = divergence if map_properties.flat else sphere_divergence
 
 		div = div_func(x=wind_x, y=wind_y)
 		div_norm = div_func(x=wind_x_norm, y=wind_y_norm)
@@ -720,9 +673,9 @@ def main(args=None):
 
 		fig.suptitle(dataset_title)
 
-		_plot(gs[0, 0], sim.elevation_m, title='Elevation (m)')
+		_plot(gs[0, 0], terrain.elevation_m, title='Elevation (m)')
 		_plot(gs[0, 1], sim.land_blur, title='Land blur')
-		_plot(gs[0, 2], sim.elevation_blur, title='Elevation blur')
+		_plot(gs[0, 2], terrain.elevation_100km, title='Elevation blur')
 		_plot(gs[0, 3], sim.hill_map, vmin=0.0, title='Hill map')
 
 		ax_hill_gradient = _plot(gs[1, 2], hill_gradient_mag, title='Hill map gradient')
@@ -731,8 +684,7 @@ def main(args=None):
 		_plot(gs[2, 2], div, cmap='bwr', title='Divergence', norm=colors.SymLogNorm(linthresh=1, vmin=-1e3, vmax=1e3))
 		_plot(gs[2, 3], div_norm, cmap='bwr', title='Divergence of normalized', norm=colors.SymLogNorm(linthresh=1, vmin=-1e3, vmax=1e3))
 
-
-		wind_elevation_im = sim.elevation_m.copy()
+		wind_elevation_im = terrain.elevation_m.copy()
 		wind_elevation_im[topography_m < 0] = -1000.
 
 		# TODO: is it possible to overlay this with elevation, without it looking messy?

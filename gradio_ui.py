@@ -95,8 +95,9 @@ def gradio_callback_map_generator(
 	if planet.polar_azimuthal is not None:
 		polar_azimuthal = np.concatenate(planet.polar_azimuthal, axis=1)
 
-	# TODO: save these to files, and show filepath
-	# (likely faster than Gradio default of embedding Base64-encoded, at least for large images)
+	elevation_imgs = [planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color]
+	if planet.erosion_img is not None:
+		elevation_imgs.append(planet.erosion_img)
 
 	return (
 		print_str,
@@ -104,7 +105,7 @@ def gradio_callback_map_generator(
 		planet.views,
 		[polar_azimuthal],
 		[planet.biomes_img],
-		[planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color, planet.erosion_img],
+		elevation_imgs,
 		[planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs,
 		[planet.graph_figure],
 	)

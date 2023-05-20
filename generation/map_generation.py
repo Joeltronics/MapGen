@@ -14,11 +14,11 @@ from PIL import Image
 
 from .coloring import to_image, biome_map, BIOME_GRID
 from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
-from .generation_utils import make_latitude_map
+from .map_properties import MapProperties
 from .rainfall import calculate_rainfall, latitude_rainfall_fn, DEFAULT_PRECIPITATION_RANGE_CM
 from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
-from .topography import get_earth_topography, scale_topography_for_water_level, generate_topography
-from .winds import make_prevailing_wind, make_prevailing_wind_imgs
+from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
+from .winds import WindSimulation, make_prevailing_wind_imgs
 
 from utils.image import float_to_uint8, remap, matplotlib_figure_canvas_to_image, map_gradient
 from utils.map_projection import make_projection_map
@@ -217,24 +217,21 @@ class Planet:
 	@classmethod
 	def make(
 			cls,
-			latitude_range_deg: tuple[float, float],
-			topography_m: np.ndarray,
+			map_properties: MapProperties,
+			terrain: Terrain,
 			temperature_C: np.ndarray,
 			prevailing_wind_mps: np.ndarray,
 			rainfall_cm: np.ndarray,
 			flat_map: bool,
 			graph_figure=None,
-			erosion=None,
 			) -> 'Planet':
+
+		topography_m = terrain.terrain_m
 
 		if not (topography_m.shape == temperature_C.shape == rainfall_cm.shape):
 			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {rainfall_cm.shape}')
 
 		height, width = topography_m.shape
-
-		latitude_range_deg = sorted(latitude_range_deg)
-		latitude_span_deg = latitude_range_deg[1] - latitude_range_deg[0]
-		assert latitude_span_deg > 0
 
 		land_mask = topography_m >= 0
 		water_mask = np.invert(land_mask)
@@ -247,7 +244,7 @@ class Planet:
 		rainfall_01 = rescale(rainfall_cm)
 
 		tprint('Calculating gradient')
-		gradient_x, gradient_y = map_gradient(elevation_above_sea_m, flat_map=flat_map, latitude_span=latitude_span_deg)
+		gradient_x, gradient_y = map_gradient(elevation_above_sea_m, flat_map=flat_map, latitude_span=map_properties.latitude_span)
 		gradient_mag = np.sqrt(np.square(gradient_x) + np.square(gradient_y))
 		tprint('Gradient range: X [%f, %f], Y [%f, %f], mag [%f, %f]' % (
 			*data_range(gradient_x), *data_range(gradient_y), *data_range(gradient_mag)
@@ -262,11 +259,9 @@ class Planet:
 		elevation_img = ELEVATION_CMAP(elevation_11 * 0.5 + 0.5)
 		temperature_img = TEMPERATURE_CMAP(temperature_01)
 		rainfall_img = RAINFALL_CMAP(rainfall_01)
-		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=latitude_range_deg)
+		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=map_properties.latitude_range)
 
-		erosion_img = None
-		if erosion is not None:
-			erosion_img = EROSION_CMAP(rescale(-erosion))
+		erosion_img = EROSION_CMAP(rescale(-terrain.erosion)) if (terrain.erosion is not None) else None
 
 		land_water_img = np.zeros((height, width, 3), dtype=np.uint8)
 		land_water_img[land_mask, :] = LAND
@@ -357,18 +352,20 @@ def debug_graph(water_amount):
 
 
 def _generate(
-		coord: NoiseCoords,
 		params: GeneratorParams,
-		width: int,
-		height: int,
-		flat_map: bool,
-		latitude_range_deg=(-90, 90),
+		map_properties: MapProperties,
 		fbm_func=None,
 		) -> Planet:
 
-	# TODO: use coord (then no need for fbm_func)
-
 	tprint('Generating...', is_start=True)
+
+	# TODO: use coord (then no need for fbm_func)
+	coord = map_properties.noise_coord
+	width = map_properties.width
+	height = map_properties.height
+	flat_map = map_properties.flat
+	latitude_range_deg = map_properties.latitude_range
+	latitude_deg_2d = map_properties.latitude_map
 
 	noise_strength = params.noise_strength
 	use_noise = noise_strength > 0
@@ -379,8 +376,6 @@ def _generate(
 	temperature_range_C = (params.temperature.pole_C, params.temperature.equator_C)
 
 	mountain_cell_base_frequency = 1.0 / params.erosion.cell_size
-
-	latitude_deg_2d = make_latitude_map(height=height, width=width, latitude_range=latitude_range_deg)
 
 	# TODO: cache previous noise, and reuse if unchanged
 
@@ -426,15 +421,21 @@ def _generate(
 
 	if params.topography.use_earth:
 		tprint('Loading earth topography data')
-		topography_m, topography_norm = get_earth_topography(width=width, height=height)
-		assert topography_m.shape == latitude_deg_2d.shape
+		terrain = get_earth_topography(map_properties)
 	else:
-		topography_m, topography_norm, erosion = generate_topography(
+		terrain = generate_topography(
+			map_properties=map_properties,
 			topography_noise=topography_noise,
 			valley_noise=valley_noise,
 			water_amount=water_amount,
 			erosion_amount=params.erosion.amount
 		)
+
+	# TODO: deprecate the need for these - just access terrain directly
+	topography_m = terrain.terrain_m
+	topography_norm = terrain.terrain_norm
+	assert topography_m.shape == latitude_deg_2d.shape
+
 
 	"""
 	TODO: Rainfall should affect erosion
@@ -448,13 +449,12 @@ def _generate(
 	"""
 	# TODO: pass in some noise for domain warping
 	tprint('Calculating wind')
-	prevailing_wind_mps = make_prevailing_wind(
-		topography_m=topography_m, latitude_range_deg=latitude_range_deg, flat_map=flat_map)
+	prevailing_wind_mps = WindSimulation(map_properties=map_properties, terrain=terrain).process()
 
 	tprint('Calculating temperature')
 	temperature_C = calculate_temperature(
 		latitude_deg=latitude_deg_2d,
-		topography_m=topography_m,
+		topography_m=terrain.terrain_m,
 		temperature_noise=temperature_noise,
 		ocean_turbulence=ocean_turbulence,
 		temperature_range_C=temperature_range_C,
@@ -469,9 +469,8 @@ def _generate(
 
 	tprint('Assembling data into planet...')
 	ret = Planet.make(
-		latitude_range_deg=latitude_range_deg,
-		topography_m=topography_m,
-		erosion=erosion,
+		map_properties=map_properties,
+		terrain=terrain,
 		temperature_C=temperature_C,
 		prevailing_wind_mps=prevailing_wind_mps,
 		rainfall_cm=rainfall_cm,
@@ -492,17 +491,14 @@ def generate_flat_map(params: GeneratorParams, resolution: int) -> Planet:
 	# TODO: latitude options
 	# TODO: option to always make it an island
 
+	noise_coord = NoiseCoords.xy_grid(height=height, width=width)
+
+	map_props = MapProperties(flat=True, height=height, width=width, noise_coord=noise_coord)
+
 	def fbm_func(**kwargs):
 		return fbm(width=width, height=height, **kwargs)
 
-	return _generate(
-		coord=NoiseCoords.xy_grid(height=height, width=width),
-		params=params,
-		width=width,
-		height=height,
-		flat_map=True,
-		fbm_func=fbm_func,
-	)
+	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
 
 
 def generate_planet_2d(params: GeneratorParams, resolution: int) -> Planet:
@@ -511,35 +507,29 @@ def generate_planet_2d(params: GeneratorParams, resolution: int) -> Planet:
 
 	# TODO: Decrease high frequency amplitudes at higher latitudes
 
+	noise_coord = NoiseCoords.cylinder_coord(height=height, width=width)
+
+	map_props = MapProperties(flat=False, height=height, width=width, noise_coord=noise_coord)
+
 	def fbm_func(**kwargs):
 		# return fbm(width=width, height=height, **kwargs)
 		return wrapped_fbm(width=width, height=height, wrap_x=True, wrap_y=False, **kwargs)
 
-	return _generate(
-		coord=NoiseCoords.cylinder_coord(height=height, width=width),
-		params=params,
-		width=width,
-		height=height,
-		flat_map=False,
-		fbm_func=fbm_func,
-	)
+	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
 
 
 def generate_planet_3d(params: GeneratorParams, resolution: int) -> Planet:
 	width = resolution
 	height = resolution // 2
 
+	noise_coord = NoiseCoords.sphere_coord(height=height, width=width)
+
+	map_props = MapProperties(flat=False, height=height, width=width, noise_coord=noise_coord)
+
 	def fbm_func(**kwargs):
 		return sphere_fbm(height=height, **kwargs)
 
-	return _generate(
-		coord=NoiseCoords.sphere_coord(height=height, width=width),
-		params=params,
-		width=width,
-		height=height,
-		flat_map=False,
-		fbm_func=fbm_func,
-	)
+	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
 
 
 def generate(params: GeneratorParams, resolution: int) -> Planet:

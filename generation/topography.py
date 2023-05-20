@@ -1,23 +1,105 @@
 #!/usr/bin/env python3
 
+from functools import cached_property
+from math import isclose
 from typing import Final, Optional
 
 import numpy as np
 
 from data.data import get_topography, get_mask
 
-from utils.numeric import rescale
-from utils.image import resize_array
+from .map_properties import MapProperties
+
+from utils.numeric import rescale, max_abs
+from utils.image import resize_array, map_gradient, gaussian_blur_map
 from utils.utils import tprint
 
 
-def get_earth_topography(
-		width: int,
-		height: int,
-		) -> np.ndarray:
-	"""
-	:returns: (topography in meters, topography in in range [-1, 1])
-	"""
+class Terrain:
+	def __init__(
+			self,
+			map_properties: MapProperties,
+			terrain_m: Optional[np.ndarray] = None,
+			terrain_norm: Optional[np.ndarray] = None,
+			erosion: Optional[np.ndarray] = None,
+			):
+
+		if terrain_m is None:
+			if terrain_norm is None:
+				raise ValueError('Must provide either terrain_m or terrain_norm')
+			terrain_m = rescale(terrain_norm, (-1., 1.), (-8000., 8000.))
+		elif terrain_norm is None:
+			max_val = max(8000, max_abs(terrain_m))
+			terrain_norm = rescale(terrain_m, (-max_val, max_val), (-1, 1))
+
+		self._map_properties = map_properties
+
+		self._terrain_m = terrain_m
+		self._terrain_norm = terrain_norm
+
+		self._elevation_m = np.maximum(terrain_m, 0.)
+
+		self._erosion = erosion
+
+	# Simple getter properties
+
+	@property
+	def terrain_m(self) -> np.ndarray:
+		return self._terrain_m
+	
+	@property
+	def terrain_norm(self) -> np.ndarray:
+		return self._terrain_norm
+
+	@property
+	def elevation_m(self) -> np.ndarray:
+		return self._elevation_m
+
+	@property
+	def erosion(self) -> Optional[np.ndarray]:
+		return self._erosion
+
+	# Cached properties
+
+	@cached_property
+	def land_mask(self) -> np.ndarray:
+		return self._terrain_m >= 0
+
+	@cached_property
+	def gradient(self) -> tuple[np.ndarray, np.ndarray]:
+		return map_gradient(self.elevation_m, flat_map=self._map_properties.flat, magnitude=False, latitude_span=self._map_properties.latitude_span)
+
+	@cached_property
+	def gradient_magnitude(self) -> np.ndarray:
+		return map_gradient(self.elevation_m, flat_map=self._map_properties.flat, magnitude=True, latitude_span=self._map_properties.latitude_span)
+
+	@cached_property
+	def elevation_100km(self) -> np.ndarray:
+		return gaussian_blur_map(self.elevation_m, sigma_km=100.0, flat_map=self._map_properties.flat, latitude_span=self._map_properties.latitude_span)
+
+	@cached_property
+	def gradient_100km(self) -> tuple[np.ndarray, np.ndarray]:
+		# TODO: can use elevation_100km for this
+		return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=False, latitude_span=self._map_properties.latitude_span)
+
+	@cached_property
+	def gradient_magnitude_100km(self) -> np.ndarray:
+		return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=True, latitude_span=self._map_properties.latitude_span)
+
+
+def get_earth_topography(map_properties: MapProperties) -> Terrain:
+
+	if not all([
+			isclose(map_properties.latitude_range[0], -90),
+			isclose(map_properties.latitude_range[1], 90),
+			isclose(map_properties.longitude_range[0], -180),
+			isclose(map_properties.longitude_range[1], 180)]):
+		raise NotImplementedError(
+			'latitude & longitude ranges must be full globe for get_earth_topography; ' +
+			f'lat {map_properties.latitude_range}; lon {map_properties.longitude_range}')
+
+	width = map_properties.width
+	height = map_properties.height
 
 	topography_m = get_topography()
 
@@ -39,7 +121,7 @@ def get_earth_topography(
 
 	topography_norm = rescale(topography_m, (-8000., 8000.), (-1., 1.))
 
-	return topography_m, topography_norm
+	return Terrain(map_properties=map_properties, terrain_m=topography_m, terrain_norm=topography_norm)
 
 
 def scale_topography_for_water_level(topography_norm: np.ndarray, water_amount=0.5, power_scale=False) -> np.ndarray:
@@ -113,6 +195,7 @@ def erode(
 
 
 def generate_topography(
+		map_properties: MapProperties,
 		topography_noise: np.ndarray,
 		valley_noise: Optional[np.ndarray],
 		water_amount: float,
@@ -130,4 +213,4 @@ def generate_topography(
 
 	topography_m = rescale(topography_norm, (-1., 1.), (-8000., 8000.))
 
-	return topography_m, topography_norm, erosion
+	return Terrain(map_properties=map_properties, terrain_m=topography_m, terrain_norm=topography_norm, erosion=erosion)
