@@ -90,24 +90,28 @@ def gradio_callback_map_generator(
 	planet = generate(params, resolution=resolution)
 	print('Done')
 
-
 	polar_azimuthal = None
 	if planet.polar_azimuthal is not None:
 		polar_azimuthal = np.concatenate(planet.polar_azimuthal, axis=1)
 
-	elevation_imgs = [planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color]
-	if planet.erosion_img is not None:
-		elevation_imgs.append(planet.erosion_img)
+	elevation_imgs = [planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color, planet.erosion_img]
+
+	def sanitize(items):
+		if isinstance(items, np.ndarray):
+			return [items]
+		if not items:
+			return []
+		return [val for val in items if val is not None]
 
 	return (
 		print_str,
-		[planet.equirectangular],
-		planet.views,
-		[polar_azimuthal],
-		[planet.biomes_img],
-		elevation_imgs,
-		[planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs,
-		[planet.graph_figure],
+		sanitize(planet.equirectangular),
+		sanitize(planet.views),
+		sanitize(polar_azimuthal),
+		sanitize(planet.biomes_img),
+		sanitize(elevation_imgs),
+		sanitize([planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs),
+		sanitize(planet.graph_figure),
 	)
 
 
