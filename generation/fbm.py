@@ -54,7 +54,43 @@ def _noise4v(x: np.ndarray, y: np.ndarray, z: np.ndarray, w: np.ndarray, perm) -
 	return ret
 
 
-def xy_grid(width: int, height: int):
+def _noisev(
+		open_simplex_obj: OpenSimplex,
+		x: np.ndarray,
+		y: Optional[np.ndarray] = None,
+		z: Optional[np.ndarray] = None,
+		w: Optional[np.ndarray] = None,
+		/,
+		frequency: float = 1.0,
+		) -> np.ndarray:
+
+	if y is None:
+		return _noise2v(
+			x * frequency,
+			np.zeros_like(x),
+			open_simplex_obj._perm)
+	elif z is None:
+		return _noise2v(
+			x * frequency,
+			y * frequency,
+			open_simplex_obj._perm)
+	elif w is None:
+		return _noise3v(
+			x * frequency,
+			y * frequency,
+			z * frequency,
+			open_simplex_obj._perm,
+			open_simplex_obj._perm_grad_index3)
+	else:
+		return _noise4v(
+			x * frequency,
+			y * frequency,
+			z * frequency,
+			w * frequency,
+			open_simplex_obj._perm)
+
+
+def _xy_grid(width: int, height: int):
 	max_dim = max(width, height)
 	x_max = width / max_dim
 	y_max = height / max_dim
@@ -63,8 +99,7 @@ def xy_grid(width: int, height: int):
 	return np.meshgrid(x, y)
 
 
-# def sphere_coord(height: int, width: Optional[int]=None, radius=1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-def sphere_coord(height: int, width: Optional[int]=None, radius=1/TAU) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _sphere_coord(height: int, width: Optional[int]=None, radius=1/TAU) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 	# TODO: should default radius be something else, equivalent to cylinder or double_wrap? like 1/PI or 1/TAU or 1/4pi
 	# Unlike those, resulting coordinates will all be same scale, so it probably doesn't matter
@@ -83,10 +118,10 @@ def sphere_coord(height: int, width: Optional[int]=None, radius=1/TAU) -> Tuple[
 	return x, y, z
 
 
-def cylinder_coord(width: int, height: int):
+def _cylinder_coord(width: int, height: int):
 	# https://www.redblobgames.com/maps/terrain-from-noise/
 
-	nx, ny = xy_grid(width=width, height=height)
+	nx, ny = _xy_grid(width=width, height=height)
 
 	angle_x = TAU * nx
 	# In "noise parameter space", we need nx and ny to travel the
@@ -100,9 +135,9 @@ def cylinder_coord(width: int, height: int):
 	return x, y, z
 
 
-def double_wrap_coord(width: int, height: int, radius=1/TAU):
+def _torus_4d_coord(width: int, height: int, radius=1/TAU):
 	# https://www.redblobgames.com/maps/terrain-from-noise/
-	nx, ny = xy_grid(width=width, height=height)
+	nx, ny = _xy_grid(width=width, height=height)
 	angle_x = TAU * nx
 	angle_y = TAU * ny
 	x = radius * np.cos(angle_x)
@@ -115,20 +150,20 @@ def double_wrap_coord(width: int, height: int, radius=1/TAU):
 class NoiseCoords:
 
 	@classmethod
-	def xy_grid(cls, width: int, height: int):
-		return cls(*xy_grid(width=width, height=height))
+	def make_xy_grid(cls, width: int, height: int):
+		return cls(*_xy_grid(width=width, height=height))
 
 	@classmethod
-	def sphere_coord(cls, height: int, width: Optional[int]=None):
-		return cls(*sphere_coord(height=height, width=width))
+	def make_sphere(cls, height: int, width: Optional[int]=None):
+		return cls(*_sphere_coord(height=height, width=width))
 
 	@classmethod
-	def cylinder_coord(cls, width: int, height: int):
-		return cls(*cylinder_coord(width=width, height=height))
+	def make_cylinder(cls, width: int, height: int):
+		return cls(*_cylinder_coord(width=width, height=height))
 
 	@classmethod
-	def double_wrap_coord(cls, width: int, height: int):
-		return cls(*double_wrap_coord(width=width, height=height))
+	def make_double_wrap(cls, width: int, height: int):
+		return cls(*_torus_4d_coord(width=width, height=height))
 
 	def __init__(self, *coord: np.ndarray):
 		self._coord: tuple[np.ndarray, ...] = coord
@@ -220,13 +255,15 @@ class FractalNoise:
 		self.fns = fns.Noise(seed=seed)
 
 		self.fns.frequency = self.base_frequency
+
+		self.fns.noiseType = fns.NoiseType.SimplexFractal
+
+		self.fns.fractal.fractalType = fns.FractalType.FBM  # TODO: make this a parameter
 		self.fns.fractal.octaves = self.octaves
 		self.fns.fractal.lacunarity = self.lacunarity
 		self.fns.fractal.gain = self.gain
-		self.fns.perturb.perturbType = fns.PerturbType.NoPerturb
 
-		# TODO?
-		# self.fns.noiseType = fns.NoiseType.SimplexFractal
+		self.fns.perturb.perturbType = fns.PerturbType.NoPerturb
 
 	def _init_opensimplex(self):
 		if self.open_simplex_objs:
@@ -246,10 +283,11 @@ class FractalNoise:
 			amplitude *= self.gain
 		self.init_amplitude = 1.0 / amplitude_sum
 
-	def _gen_fns(self, nc: NoiseCoords, /) -> np.ndarray:
+	def _gen_fns(self, nc: NoiseCoords, /, fractal_type = fns.FractalType.FBM) -> np.ndarray:
 		self._init_fns()
 		assert self.fns is not None
 		assert nc.fns_coord is not None
+		self.fns.fractal.fractalType = fractal_type
 		noise = self.fns.genFromCoords(nc.fns_coord)
 		return noise[:nc.num_points].reshape(nc.shape)
 
@@ -283,30 +321,7 @@ class FractalNoise:
 		frequency = self.base_frequency
 		amplitude = self.init_amplitude
 		for open_simplex_obj in self.open_simplex_objs:
-			if y is None:
-				ret += amplitude * _noise2v(
-					x * frequency,
-					np.zeros_like(x),
-					open_simplex_obj._perm)
-			elif z is None:
-				ret += amplitude * _noise2v(
-					x * frequency,
-					y * frequency,
-					open_simplex_obj._perm)
-			elif w is None:
-				ret += amplitude * _noise3v(
-					x * frequency,
-					y * frequency,
-					z * frequency,
-					open_simplex_obj._perm,
-					open_simplex_obj._perm_grad_index3)
-			else:
-				ret += amplitude * _noise4v(
-					x * frequency,
-					y * frequency,
-					z * frequency,
-					w * frequency,
-					open_simplex_obj._perm)
+			ret += amplitude * _noisev(open_simplex_obj, x, y, z, w, frequency=frequency)
 			frequency *= self.lacunarity
 			amplitude *= self.gain
 		return ret
@@ -328,40 +343,37 @@ class FractalNoise:
 
 		return ret
 
-	# TODO
-	# def valley_noise(self, x: float, y: float) -> float:
-	# 	ret = 0.0
-	# 	frequency = self.base_frequency
-	# 	amplitude = self.init_amplitude
-	# 	for open_simplex_obj in self.open_simplex_objs:
-	# 		ret += np.abs(open_simplex_obj.noise2(x * frequency, y * frequency)) * amplitude
-	# 		frequency *= self.lacunarity
-	# 		amplitude *= self.gain
-	# 	return ret
+	def valley_noise(self, nc: NoiseCoords, /, *, normalize=False):
 
-	def valley_noise_grid(
-			self,
-			x: np.ndarray,
-			y: np.ndarray,
-			z: Optional[np.ndarray]=None,
-			w: Optional[np.ndarray]=None,
-			/) -> np.ndarray:
+		if self.use_fns and nc.dimension <= 3:
+			ret = self._gen_fns(nc, fractal_type=fns.FractalType.Billow)
+			rescale(
+				ret,
+				(-1., np.amax(ret)) if normalize else (-1., 1.),
+				(0., 1.),
+				in_place=True)
 
-		# TODO: use FNS
+		else:
+			ret = self._valley_noise_opensimplex(nc, normalize=normalize)
+			if normalize:
+				ret /= np.amax(ret)
+
+		return ret
+
+	def ridge_noise(self, nc: NoiseCoords, /, *, normalize=False):
+		return 1.0 - self.valley_noise(nc, normalize=normalize)
+
+	def _valley_noise_opensimplex(self, nc: NoiseCoords, normalize: bool):
+
 		self._init_opensimplex()
+		assert self.open_simplex_objs
 
 		ret = None
 		frequency = self.base_frequency
 		amplitude = self.init_amplitude
 		for open_simplex_obj in self.open_simplex_objs:
-
-			if z is None:
-				layer = open_simplex_obj.noise2array(x * frequency, y * frequency)
-			elif w is None:
-				layer = open_simplex_obj.noise3array(x * frequency, y * frequency, z * frequency)
-			else:
-				layer = open_simplex_obj.noise4array(x * frequency, y * frequency, z * frequency, w * frequency)
-			layer = np.abs(layer)
+			layer = _noisev(open_simplex_obj, nc.x, nc.y, nc.z, nc.w, frequency=frequency)
+			np.abs(layer, out=layer)
 			layer *= amplitude
 			if ret is None:
 				ret = layer
@@ -371,45 +383,7 @@ class FractalNoise:
 			frequency *= self.lacunarity
 			amplitude *= self.gain
 
-		assert ret is not None
 		return ret
-
-	# TODO: this doesn't need to be a special function, can just do (1.0 - valley)
-	def ridge_noise_grid(
-			self,
-			x: np.ndarray,
-			y: np.ndarray,
-			z: Optional[np.ndarray]=None,
-			w: Optional[np.ndarray]=None,
-			/) -> np.ndarray:
-
-		ret = None
-		frequency = self.base_frequency
-		amplitude = self.init_amplitude
-		for open_simplex_obj in self.open_simplex_objs:
-
-			if z is None:
-				layer = open_simplex_obj.noise2array(x * frequency, y * frequency)
-			elif w is None:
-				layer = open_simplex_obj.noise3array(x * frequency, y * frequency, z * frequency)
-			else:
-				layer = open_simplex_obj.noise4array(x * frequency, y * frequency, z * frequency, w * frequency)
-			layer = 1.0 - np.abs(layer)
-			layer *= amplitude
-			if ret is None:
-				ret = layer
-			else:
-				ret += layer
-
-			frequency *= self.lacunarity
-			amplitude *= self.gain
-
-		assert ret is not None
-		return ret
-
-
-
-# TODO: make these all member functions of FractalNoise
 
 
 def fbm(
@@ -431,7 +405,7 @@ def fbm(
 	if coord is None:
 		if width is None or height is None:
 			raise ValueError('Must provide width & height if not providing coord')
-		coord = NoiseCoords.xy_grid(width=width, height=height)
+		coord = NoiseCoords.make_xy_grid(width=width, height=height)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
@@ -447,7 +421,9 @@ def diff_fbm(
 		**kwargs,
 		) -> np.ndarray:
 
-	# coord = NoiseCoords.xy_grid(width=width, height=height)  # TODO: use this
+	# TODO: make this a member function of FractalNoise
+
+	# coord = NoiseCoords.make_xy_grid(width=width, height=height)  # TODO: use this
 
 	if diff_steps < 1:
 		raise ValueError('diff_steps must be at least 1')
@@ -485,9 +461,10 @@ def domain_warped_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
+	# TODO: make this a member function of FractalNoise
 	# TODO: use FNS built-in domain warping
 
-	x, y = xy_grid(width, height)
+	x, y = _xy_grid(width, height)
 
 	for idx in range(warp_steps):
 
@@ -535,15 +512,15 @@ def wrapped_fbm(
 
 	transpose = False
 	if wrap_x and wrap_y:
-		nc = NoiseCoords.double_wrap_coord(width=width, height=height)
+		nc = NoiseCoords.make_double_wrap(width=width, height=height)
 	elif wrap_x:
-		nc = NoiseCoords.cylinder_coord(width=width, height=height)
+		nc = NoiseCoords.make_cylinder(width=width, height=height)
 	elif wrap_y:
 		# TODO: make transpose unnecessary - calculate the right cylinder coordinates in the first place
 		transpose = True
-		nc = NoiseCoords.cylinder_coord(width=width, height=height)
+		nc = NoiseCoords.make_cylinder(width=width, height=height)
 	else:
-		nc = NoiseCoords.xy_grid(width=width, height=height)
+		nc = NoiseCoords.make_xy_grid(width=width, height=height)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
@@ -574,7 +551,7 @@ def sphere_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
-	coord = NoiseCoords.sphere_coord(height=height, width=width)
+	coord = NoiseCoords.make_sphere(height=height, width=width)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
@@ -591,9 +568,9 @@ def sphere_fbm(
 
 def sphere_domain_warped_fbm(
 		seed: int,
-		width: int,
 		height: int,
 		warp_steps: int,
+		width: Optional[int] = None,
 		warp_amount: float = 1.0,
 		octaves: int = 8,
 		gain: float = 0.5,
@@ -604,9 +581,10 @@ def sphere_domain_warped_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
+	# TODO: put domain warping inside FractalNoise
 	# TODO: use FNS built-in domain warping
 
-	x, y, z = sphere_coord(height, width=width)
+	x, y, z = _sphere_coord(height, width=width)
 
 	for idx in range(warp_steps):
 
@@ -645,8 +623,9 @@ def sphere_domain_warped_fbm(
 
 def valley_fbm(
 		seed: int,
-		width: int,
-		height: int,
+		coord: Optional[NoiseCoords] = None,
+		width: Optional[int] = None,
+		height: Optional[int] = None,
 		octaves: int = 8,
 		gain: float = 0.5,
 		lacunarity: float = 2.0,
@@ -655,28 +634,22 @@ def valley_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
-	# coord = NoiseCoords.xy_grid(width=width, height=height)  # TODO: use this
+	if coord is None:
+		if width is None or height is None:
+			raise ValueError('Must provide width & height if not providing coord')
+		coord = NoiseCoords.make_xy_grid(width=width, height=height)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
 
-	# TODO: factor in aspect ratio
-	x_max = 1.0
-	y_max = 1.0
-	x = np.linspace(0.0, x_max, num=width, endpoint=False)
-	y = np.linspace(0.0, y_max, num=height, endpoint=False)
-	img = fractal_noise.valley_noise_grid(x, y)
-
-	if normalize:
-		img /= np.amax(img)
-
-	return img
+	return fractal_noise.valley_noise(coord, normalize=normalize)
 
 
 def ridge_fbm(
 		seed: int,
-		width: int,
-		height: int,
+		coord: Optional[NoiseCoords] = None,
+		width: Optional[int] = None,
+		height: Optional[int] = None,
 		octaves: int = 8,
 		gain: float = 0.5,
 		lacunarity: float = 2.0,
@@ -685,19 +658,12 @@ def ridge_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
-	# coord = NoiseCoords.xy_grid(width=width, height=height)  # TODO: use this
+	if coord is None:
+		if width is None or height is None:
+			raise ValueError('Must provide width & height if not providing coord')
+		coord = NoiseCoords.make_xy_grid(width=width, height=height)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
 
-	# TODO: factor in aspect ratio
-	x_max = 1.0
-	y_max = 1.0
-	x = np.linspace(0.0, x_max, num=width, endpoint=False)
-	y = np.linspace(0.0, y_max, num=height, endpoint=False)
-	img = fractal_noise.ridge_noise_grid(x, y)
-
-	if normalize:
-		rescale_in_place(img)
-
-	return img
+	return fractal_noise.ridge_noise(coord, normalize=normalize)

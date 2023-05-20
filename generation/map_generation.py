@@ -354,12 +354,10 @@ def debug_graph(water_amount):
 def _generate(
 		params: GeneratorParams,
 		map_properties: MapProperties,
-		fbm_func=None,
 		) -> Planet:
 
 	tprint('Generating...', is_start=True)
 
-	# TODO: use coord (then no need for fbm_func)
 	coord = map_properties.noise_coord
 	width = map_properties.width
 	height = map_properties.height
@@ -397,12 +395,11 @@ def _generate(
 		kwargs['seed'] = md5_hash(name) + params.seed
 		kwargs['normalize'] = True
 		if valley:
-			# TODO: pass in a valley function for the specific generator (i.e. use proper sphere noise!)
-			return noise_strength * valley_fbm(width=width, height=height, **kwargs)
+			return noise_strength * valley_fbm(coord=coord, **kwargs)
 		elif diff_steps == 0:
-			return noise_strength * fbm_func(**kwargs)
+			return noise_strength * fbm(coord=coord, **kwargs)
 		else:
-			return noise_strength * diff_fbm(diff_steps=diff_steps, fbm_func=fbm_func, **kwargs)
+			return noise_strength * diff_fbm(coord=coord, diff_steps=diff_steps, **kwargs)
 
 	# Override noise_strength here, because it's used later in calculate_temperature
 	temperature_noise = _fbm('temperature', noise_strength=(1.0 if noise_strength > 0 else 0.0)) * 0.5 + 0.5
@@ -491,14 +488,9 @@ def generate_flat_map(params: GeneratorParams, resolution: int) -> Planet:
 	# TODO: latitude options
 	# TODO: option to always make it an island
 
-	noise_coord = NoiseCoords.xy_grid(height=height, width=width)
-
+	noise_coord = NoiseCoords.make_xy_grid(height=height, width=width)
 	map_props = MapProperties(flat=True, height=height, width=width, noise_coord=noise_coord)
-
-	def fbm_func(**kwargs):
-		return fbm(width=width, height=height, **kwargs)
-
-	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
+	return _generate(params=params, map_properties=map_props)
 
 
 def generate_planet_2d(params: GeneratorParams, resolution: int) -> Planet:
@@ -507,29 +499,18 @@ def generate_planet_2d(params: GeneratorParams, resolution: int) -> Planet:
 
 	# TODO: Decrease high frequency amplitudes at higher latitudes
 
-	noise_coord = NoiseCoords.cylinder_coord(height=height, width=width)
-
+	noise_coord = NoiseCoords.make_cylinder(height=height, width=width)
 	map_props = MapProperties(flat=False, height=height, width=width, noise_coord=noise_coord)
-
-	def fbm_func(**kwargs):
-		# return fbm(width=width, height=height, **kwargs)
-		return wrapped_fbm(width=width, height=height, wrap_x=True, wrap_y=False, **kwargs)
-
-	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
+	return _generate(params=params, map_properties=map_props)
 
 
 def generate_planet_3d(params: GeneratorParams, resolution: int) -> Planet:
 	width = resolution
 	height = resolution // 2
 
-	noise_coord = NoiseCoords.sphere_coord(height=height, width=width)
-
+	noise_coord = NoiseCoords.make_sphere(height=height, width=width)
 	map_props = MapProperties(flat=False, height=height, width=width, noise_coord=noise_coord)
-
-	def fbm_func(**kwargs):
-		return sphere_fbm(height=height, **kwargs)
-
-	return _generate(params=params, map_properties=map_props, fbm_func=fbm_func)
+	return _generate(params=params, map_properties=map_props)
 
 
 def generate(params: GeneratorParams, resolution: int) -> Planet:
