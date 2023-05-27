@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from functools import cached_property
-from typing import Final
+from typing import Final, Optional
 
 from matplotlib.backends.backend_agg import FigureCanvas
 from matplotlib.figure import Figure
@@ -87,12 +87,15 @@ class WindSimulation:
 	def __init__(
 			self,
 			map_properties: MapProperties,
-			# topography_m: np.ndarray
 			terrain: Terrain,
+			effective_latitude_deg: Optional[np.ndarray] = None,
 			):
 
 		self._map_properties = map_properties
 		self._terrain = terrain
+
+		# TODO: use this
+		self._effective_latitude_deg = effective_latitude_deg if (effective_latitude_deg is not None) else map_properties.latitude_column
 
 		self._height = map_properties.height
 		self._width = map_properties.width

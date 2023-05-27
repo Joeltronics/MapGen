@@ -52,7 +52,8 @@ class TopographyParams:
 
 
 @dataclass
-class TemperatureParams:
+class ClimateParams:
+	effective_latitude_noise_degrees: float = 5.0
 	pole_C: float = float(DEFAULT_TEMPERATURE_RANGE_C[0])
 	equator_C: float = float(DEFAULT_TEMPERATURE_RANGE_C[1])
 
@@ -68,7 +69,7 @@ class GeneratorParams:
 	generator: GeneratorType
 	seed: int
 	topography: TopographyParams
-	temperature: TemperatureParams
+	climate: ClimateParams
 	erosion: ErosionParams
 
 	noise_strength: float = 1.0
@@ -82,6 +83,7 @@ GIST_EARTH_CMAP_ZERO_POINT = 1.0 / 3.0
 
 ELEVATION_CMAP = plt.get_cmap('seismic')
 EROSION_CMAP = plt.get_cmap('inferno')
+EFFECTIVE_LATITUDE_CMAP = plt.get_cmap('plasma')
 TEMPERATURE_CMAP = plt.get_cmap('coolwarm')
 RAINFALL_CMAP = plt.get_cmap('YlGn')
 
@@ -198,6 +200,9 @@ class Planet:
 	gradient_img_color: Optional[np.ndarray] = None
 	erosion_img: Optional[np.ndarray] = None
 
+	climate_effective_latitude_deg: Optional[np.ndarray] = None
+	climate_effective_latitude_img: Optional[np.ndarray] = None
+
 	temperature_C: Optional[np.ndarray] = None
 	temperature_img: Optional[np.ndarray] = None
 
@@ -219,6 +224,7 @@ class Planet:
 			cls,
 			map_properties: MapProperties,
 			terrain: Terrain,
+			climate_effective_latitude_deg: np.ndarray,
 			temperature_C: np.ndarray,
 			prevailing_wind_mps: np.ndarray,
 			rainfall_cm: np.ndarray,
@@ -256,6 +262,11 @@ class Planet:
 		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, rainfall_cm=rainfall_cm)
 
 		tprint('Making other data views')
+
+		climate_effective_latitude_img = np.abs(climate_effective_latitude_deg)
+		rescale(climate_effective_latitude_img, (0., 90.), (1., 0.), clip=True, in_place=True)
+		climate_effective_latitude_img = EFFECTIVE_LATITUDE_CMAP(climate_effective_latitude_img)
+
 		elevation_img = ELEVATION_CMAP(elevation_11 * 0.5 + 0.5)
 		temperature_img = TEMPERATURE_CMAP(temperature_01)
 		rainfall_img = RAINFALL_CMAP(rainfall_01)
@@ -289,6 +300,8 @@ class Planet:
 			gradient_img_bw=gradient_img_bw,
 			gradient_img_color=gradient_img_color,
 			erosion_img=erosion_img,
+			climate_effective_latitude_deg=climate_effective_latitude_deg,
+			climate_effective_latitude_img=climate_effective_latitude_img,
 			temperature_C=temperature_C,
 			temperature_img=temperature_img,
 			prevailing_wind_data=prevailing_wind_mps,
@@ -371,7 +384,7 @@ def _generate(
 	elevation_steps = params.topography.elevation_steps
 	water_amount = params.topography.water_amount
 	base_frequency = 1.0 / params.topography.continent_size
-	temperature_range_C = (params.temperature.pole_C, params.temperature.equator_C)
+	temperature_range_C = (params.climate.pole_C, params.climate.equator_C)
 
 	mountain_cell_base_frequency = 1.0 / params.erosion.cell_size
 
@@ -393,7 +406,16 @@ def _generate(
 		if 'octaves' not in kwargs:
 			kwargs['octaves'] = octaves
 		kwargs['seed'] = md5_hash(name) + params.seed
+
+		"""
+		TODO: shouldn't normalize
+		- Won't work once supporting zooming in on one area
+		- Can lead to slightly different results based on resolution
+
+		But right now normalization is somewhat necessary - FBM class needs to be smarter about amplitudes
+		"""
 		kwargs['normalize'] = True
+
 		if valley:
 			return noise_strength * valley_fbm(coord=coord, **kwargs)
 		elif diff_steps == 0:
@@ -405,8 +427,10 @@ def _generate(
 	temperature_noise = _fbm('temperature', noise_strength=(1.0 if noise_strength > 0 else 0.0)) * 0.5 + 0.5
 	rainfall_noise = _fbm('rainfall') * 0.5 + 0.5
 
-	ocean_turbulence = _fbm('turbulence', base_frequency=4, gain=0.75)
-	# ocean_turbulence = _fbm('turbulence', diff_steps=3)
+	ocean_turbulence_noise = _fbm('turbulence', base_frequency=4, gain=0.75)
+
+	latitude_noise_strength = noise_strength * params.climate.effective_latitude_noise_degrees
+	effective_latitude_noise = _fbm('effective_latitude', noise_strength=latitude_noise_strength) if latitude_noise_strength > 0 else None
 
 	topography_noise = None
 	valley_noise = None
@@ -428,11 +452,21 @@ def _generate(
 			erosion_amount=params.erosion.amount
 		)
 
-	# TODO: deprecate the need for these - just access terrain directly
-	topography_m = terrain.terrain_m
-	topography_norm = terrain.terrain_norm
-	assert topography_m.shape == latitude_deg_2d.shape
+	"""
+	TODO: Encapsulate wind + rain + temperature into a single ClimateSimulation class
+	Then make climate_effective_latitude_deg (as well as a radians version) a cached property
+	(RIght now, it gets converted to radians in at least 2 differnet places)
+	"""
 
+	# "Effective latitude" for climate simulation
+	# i.e. latitude + noise
+	if effective_latitude_noise is None:
+		climate_effective_latitude_deg = map_properties.latitude_map
+		# climate_effective_latitude_deg = map_properties.latitude_column  # TODO optimization: use this (need to support everywhere)
+	else:
+		climate_effective_latitude_deg = effective_latitude_noise * np.cos(map_properties.latitude_map_radians)
+		climate_effective_latitude_deg += map_properties.latitude_map
+		assert -90. <= np.amin(climate_effective_latitude_deg) and np.amax(climate_effective_latitude_deg) <= 90.		
 
 	"""
 	TODO: Rainfall should affect erosion
@@ -444,22 +478,26 @@ def _generate(
 	- Apply erosion, scaled by rainfall
 	- Recalculate wind & rainfall with new eroded elevation
 	"""
-	# TODO: pass in some noise for domain warping
+	# TODO: pass in some noise for domain warping, and use this same noise for wind/temperature/rainfall
 	tprint('Calculating wind')
-	prevailing_wind_mps = WindSimulation(map_properties=map_properties, terrain=terrain).process()
+	prevailing_wind_mps = WindSimulation(
+		map_properties=map_properties,
+		terrain=terrain,
+		effective_latitude_deg=climate_effective_latitude_deg,
+	).process()
 
 	tprint('Calculating temperature')
 	temperature_C = calculate_temperature(
-		latitude_deg=latitude_deg_2d,
+		effective_latitude_deg=climate_effective_latitude_deg,
 		topography_m=terrain.terrain_m,
 		temperature_noise=temperature_noise,
-		ocean_turbulence=ocean_turbulence,
+		ocean_turbulence_noise=ocean_turbulence_noise,
 		temperature_range_C=temperature_range_C,
 		noise_strength=(0.75*noise_strength),
 	)
 
 	tprint('Calculating Rainfall')
-	rainfall_cm = calculate_rainfall(rainfall_noise, latitude_deg=latitude_deg_2d)
+	rainfall_cm = calculate_rainfall(rainfall_noise, effective_latitude_deg=climate_effective_latitude_deg)
 
 	tprint('Generating graphs')
 	graph_figure = debug_graph(water_amount=water_amount)
@@ -468,6 +506,7 @@ def _generate(
 	ret = Planet.make(
 		map_properties=map_properties,
 		terrain=terrain,
+		climate_effective_latitude_deg=climate_effective_latitude_deg,
 		temperature_C=temperature_C,
 		prevailing_wind_mps=prevailing_wind_mps,
 		rainfall_cm=rainfall_cm,

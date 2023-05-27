@@ -19,7 +19,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 
 from generation.fbm import fbm, diff_fbm, diff_fbm, valley_fbm, ridge_fbm, sphere_fbm, wrapped_fbm, domain_warped_fbm, sphere_domain_warped_fbm
-from generation.map_generation import GeneratorParams, GeneratorType, TopographyParams, TemperatureParams, ErosionParams, Planet, generate
+from generation.map_generation import GeneratorParams, GeneratorType, TopographyParams, ClimateParams, ErosionParams, Planet, generate
 
 from utils.image import float_to_uint8, remap
 from utils.map_projection import make_projection_map
@@ -44,6 +44,7 @@ def gradio_callback_map_generator(
 		water_amount: float,
 		continent_size: float,
 		elevation_steps: int,
+		effective_latitude_noise_degrees: float,
 		pole_temp_C: float,
 		equator_temp_C: float,
 		erosion_amount: float,
@@ -75,7 +76,8 @@ def gradio_callback_map_generator(
 			water_amount=water_amount,
 			continent_size=continent_size,
 		),
-		temperature=TemperatureParams(
+		climate=ClimateParams(
+			effective_latitude_noise_degrees=effective_latitude_noise_degrees,
 			pole_C=pole_temp_C,
 			equator_C=equator_temp_C,
 		),
@@ -104,6 +106,8 @@ def gradio_callback_map_generator(
 			return []
 		return [val for val in items if val is not None]
 
+	climate_imgs = [planet.temperature_img, planet.rainfall_img] + planet.prevailing_wind_imgs + [planet.climate_effective_latitude_img]
+
 	return (
 		print_str,
 		sanitize(planet.equirectangular),
@@ -111,7 +115,7 @@ def gradio_callback_map_generator(
 		sanitize(polar_azimuthal),
 		sanitize(planet.biomes_img),
 		sanitize(elevation_imgs),
-		sanitize([planet.temperature_img] + [planet.rainfall_img] + planet.prevailing_wind_imgs),
+		sanitize(climate_imgs),
 		sanitize(planet.graph_figure),
 	)
 
@@ -140,8 +144,9 @@ def make_planet_generator_tab():
 					gr.Slider(0, 8, step=1, value=0, label='Elevation difference steps'),
 				]
 
-			with gr.Accordion('Temperature'):
+			with gr.Accordion('Climate'):
 				inputs += [
+					gr.Slider(0.0, 20.0, step=0.5, value=5.0, label='Effective latitude noise (degrees)'),
 					gr.Slider(-40, 80, step=1, value=-5, label='Average pole temperature (C)'),
 					gr.Slider(-40, 80, step=1, value=30, label='Average equator temperature (C)'),
 				]

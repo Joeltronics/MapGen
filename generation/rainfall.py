@@ -19,14 +19,14 @@ def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
 
 def calculate_rainfall(
 		noise: np.ndarray,
-		latitude_deg: np.ndarray,
+		effective_latitude_deg: np.ndarray,
 		noise_strength=0.25,
 		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
-	require_same_shape(noise, latitude_deg)
+	require_same_shape(noise, effective_latitude_deg)
 
-	latitude = np.radians(latitude_deg)
+	latitude = np.radians(effective_latitude_deg)
 	latitude_rainfall_map = latitude_rainfall_fn(latitude)
 
 	# TODO: should this use domain warping instead of interpolation? or combination of both?

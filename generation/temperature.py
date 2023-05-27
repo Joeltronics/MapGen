@@ -12,31 +12,31 @@ DEGREES_C_COLDER_PER_KM_ELEVATION: Final = 7.5
 
 
 def calculate_temperature(
-		latitude_deg: np.ndarray,
+		effective_latitude_deg: np.ndarray,
 		topography_m: np.ndarray,
 		temperature_noise: np.ndarray,
-		ocean_turbulence: np.ndarray,
-		noise_strength = 0.75,
-		turbulence_amount = 5.,
+		ocean_turbulence_noise: np.ndarray,
+		noise_strength = 0.5,
+		ocean_turbulence_amount_deg = 5.,
 		temperature_range_C = DEFAULT_TEMPERATURE_RANGE_C,
 		) -> np.ndarray:
 
-	require_same_shape(topography_m, latitude_deg, temperature_noise, ocean_turbulence)
+	require_same_shape(topography_m, effective_latitude_deg, temperature_noise, ocean_turbulence_noise)
 
-	latitude = np.radians(latitude_deg)
+	latitude = np.radians(effective_latitude_deg)
 
-	latitude_turbulent = latitude + np.radians(turbulence_amount)*ocean_turbulence
+	latitude_turbulent = latitude + np.radians(ocean_turbulence_amount_deg)*ocean_turbulence_noise
 	latitude_turbulent = np.clip(latitude_turbulent, -np.pi/2, np.pi/2)
 
 	ocean_mask = topography_m < 0
 	land_mask = np.logical_not(ocean_mask)
 
 	# TODO: should this use domain warping instead of interpolation? or combination of both?
-	# TODO: much less variation over water, but crazier domain warping
 	latitude_temp_map = np.cos(2 * latitude) * 0.5 + 0.5
 
 	temperature_01 = temperature_noise * (1.0 - noise_strength) + latitude_temp_map * noise_strength
 
+	# More domain warping over ocean
 	temperature_01[ocean_mask] = np.cos(2 * latitude_turbulent[ocean_mask]) * 0.5 + 0.5
 
 	# TODO: this is probably not the best way of going about elevation...
