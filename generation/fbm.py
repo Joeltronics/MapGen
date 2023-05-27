@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
+from enum import Enum, unique, auto
 from typing import Callable, Optional, Tuple, Union, Final
+import warnings
 
 from numba import njit, prange
 import numpy as np
@@ -214,17 +216,36 @@ class NoiseCoords:
 		return self._fns_coord
 
 
+@unique
+class Normalization(Enum):
+	none = auto()
+	amplitude = auto()
+	full = auto()
+
+
+@unique
+class FbmType(Enum):
+	standard = auto()
+	valley = auto()
+
+
 class FractalNoise:
 	def __init__(
 			self,
+
 			# Seed
 			seed: int,
+
 			# Generation params
 			octaves: int,
 			gain: float = 0.5,
 			lacunarity: float = 2.0,
 			base_frequency: float = 1.0,
-			# TODO: more parameters for noise type and such (e.g. diff, turbulence, etc)
+			noise_type: FbmType = FbmType.standard,
+
+			# TODO: add diff_steps
+
+			# Engine
 			use_fns: bool = USE_FNS_DEFAULT,
 			):
 
@@ -236,6 +257,7 @@ class FractalNoise:
 		self.gain = gain
 		self.lacunarity = lacunarity
 		self.base_frequency = base_frequency
+		self.noise_type = noise_type
 		self.use_fns = use_fns
 
 		self.open_simplex_objs: list[OpenSimplex] = []
@@ -256,9 +278,14 @@ class FractalNoise:
 
 		self.fns.frequency = self.base_frequency
 
+		# TODO: if octaves == 1, can just use Simplex; may be slightly better optimized
 		self.fns.noiseType = fns.NoiseType.SimplexFractal
 
-		self.fns.fractal.fractalType = fns.FractalType.FBM  # TODO: make this a parameter
+		if self.noise_type == FbmType.valley:
+			self.fns.fractal.fractalType = fns.FractalType.Billow
+		else:
+			self.fns.fractal.fractalType = fns.FractalType.FBM
+
 		self.fns.fractal.octaves = self.octaves
 		self.fns.fractal.lacunarity = self.lacunarity
 		self.fns.fractal.gain = self.gain
@@ -283,11 +310,10 @@ class FractalNoise:
 			amplitude *= self.gain
 		self.init_amplitude = 1.0 / amplitude_sum
 
-	def _gen_fns(self, nc: NoiseCoords, /, fractal_type = fns.FractalType.FBM) -> np.ndarray:
+	def _gen_fns(self, nc: NoiseCoords) -> np.ndarray:
 		self._init_fns()
 		assert self.fns is not None
 		assert nc.fns_coord is not None
-		self.fns.fractal.fractalType = fractal_type
 		noise = self.fns.genFromCoords(nc.fns_coord)
 		return noise[:nc.num_points].reshape(nc.shape)
 
@@ -326,32 +352,50 @@ class FractalNoise:
 			amplitude *= self.gain
 		return ret
 
-	def noise(
+	def generate(
 			self, nc: NoiseCoords, /, *,
-			normalize=False, normalize_amplitude=False,
+			normalize: Union[Normalization, bool, None] = Normalization.none,
+			) -> np.ndarray:
+
+		if (normalize is None) or (normalize is False):
+			normalize = Normalization.none
+		elif normalize is True:
+			normalize = Normalization.full
+
+		if self.noise_type == FbmType.standard:
+			return self._basic_noise(nc, normalize=normalize)
+
+		elif self.noise_type == FbmType.valley:
+			return self._valley_noise(nc, normalize=(normalize != Normalization.none))
+
+		else:
+			raise AssertionError(f'Enum value not handled: {self.noise_type!r}')
+
+	def _basic_noise(
+			self, nc: NoiseCoords, /, *,
+			normalize: Normalization = Normalization.none,
 			) -> np.ndarray:
 		if self.use_fns and nc.dimension <= 3:
 			ret = self._gen_fns(nc)
 		else:
 			ret = self._vectorized_noise_opensimplex(nc.x, nc.y, nc.z, nc.w)
 
-		# TODO: smarter amplitudes, make normalization less necessary
-		if normalize:
-			rescale_in_place(ret, range_out=(-1, 1))
-		elif normalize_amplitude:
+		# TODO: Be smarter about amplitudes, so normalization is less necessary
+		if normalize == Normalization.full:
+			rescale(ret, range_out=(-1, 1), in_place=True)
+		elif normalize == Normalization.amplitude:
 			ret /= max_abs(ret)
 
 		return ret
 
-	def valley_noise(self, nc: NoiseCoords, /, *, normalize=False):
+	def _valley_noise(self, nc: NoiseCoords, /, *, normalize=False):
 
 		if self.use_fns and nc.dimension <= 3:
-			ret = self._gen_fns(nc, fractal_type=fns.FractalType.Billow)
-			rescale(
-				ret,
-				(-1., np.amax(ret)) if normalize else (-1., 1.),
-				(0., 1.),
-				in_place=True)
+			self._init_fns()
+			assert self.fns.fractal.fractalType == fns.FractalType.Billow
+			ret = self._gen_fns(nc)
+			range_in = (-1., np.amax(ret)) if normalize else (-1., 1.)
+			rescale(ret, range_in, (0., 1.), in_place=True)
 
 		else:
 			ret = self._valley_noise_opensimplex(nc, normalize=normalize)
@@ -359,9 +403,6 @@ class FractalNoise:
 				ret /= np.amax(ret)
 
 		return ret
-
-	def ridge_noise(self, nc: NoiseCoords, /, *, normalize=False):
-		return 1.0 - self.valley_noise(nc, normalize=normalize)
 
 	def _valley_noise_opensimplex(self, nc: NoiseCoords, normalize: bool):
 
@@ -407,10 +448,18 @@ def fbm(
 			raise ValueError('Must provide width & height if not providing coord')
 		coord = NoiseCoords.make_xy_grid(width=width, height=height)
 
+	# TODO: take Normalization as argument to this function
+	if normalize:
+		normalize = Normalization.full
+	elif normalize_amplitude:
+		normalize = Normalization.amplitude
+	else:
+		normalize = Normalization.none
+
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
 
-	return fractal_noise.noise(coord, normalize=normalize, normalize_amplitude=normalize_amplitude)
+	return fractal_noise.generate(coord, normalize=normalize)
 
 
 def diff_fbm(
@@ -464,6 +513,14 @@ def domain_warped_fbm(
 	# TODO: make this a member function of FractalNoise
 	# TODO: use FNS built-in domain warping
 
+	# TODO: take Normalization as argument to this function
+	if normalize:
+		normalize = Normalization.full
+	elif normalize_amplitude:
+		normalize = Normalization.amplitude
+	else:
+		normalize = Normalization.none
+
 	x, y = _xy_grid(width, height)
 
 	for idx in range(warp_steps):
@@ -476,8 +533,8 @@ def domain_warped_fbm(
 		# TODO: normalize these?
 
 		nc = NoiseCoords(x, y)
-		x_warp = fbm_x.noise(nc)
-		y_warp = fbm_y.noise(nc)
+		x_warp = fbm_x.generate(nc)
+		y_warp = fbm_y.generate(nc)
 
 		x += (x_warp * warp_amount)
 		y += (y_warp * warp_amount)
@@ -485,14 +542,7 @@ def domain_warped_fbm(
 	nc = NoiseCoords(x, y)
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency)
-	img = fractal_noise.noise(nc)
-
-	if normalize:
-		rescale_in_place(img, range_out=(-1, 1))
-	elif normalize_amplitude:
-		img /= max_abs(img)
-
-	return img
+	return fractal_noise.generate(nc, normalize=normalize)
 
 
 def wrapped_fbm(
@@ -510,6 +560,14 @@ def wrapped_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
+	# TODO: take Normalization as argument to this function
+	if normalize:
+		normalize = Normalization.full
+	elif normalize_amplitude:
+		normalize = Normalization.amplitude
+	else:
+		normalize = Normalization.none
+
 	transpose = False
 	if wrap_x and wrap_y:
 		nc = NoiseCoords.make_double_wrap(width=width, height=height)
@@ -525,15 +583,10 @@ def wrapped_fbm(
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
 
-	img = fractal_noise.noise(nc)
+	img = fractal_noise.generate(nc, normalize=normalize)
 
 	if transpose:
 		img = img.transpose()
-
-	if normalize:
-		rescale_in_place(img, range_out=(-1, 1))
-	elif normalize_amplitude:
-		img /= max_abs(img)
 
 	return img
 
@@ -551,19 +604,20 @@ def sphere_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
+	# TODO: take Normalization as argument to this function
+	if normalize:
+		normalize = Normalization.full
+	elif normalize_amplitude:
+		normalize = Normalization.amplitude
+	else:
+		normalize = Normalization.none
+
 	coord = NoiseCoords.make_sphere(height=height, width=width)
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
 
-	img = fractal_noise.noise(coord)
-
-	if normalize:
-		rescale_in_place(img, range_out=(-1, 1))
-	elif normalize_amplitude:
-		img /= max_abs(img)
-
-	return img
+	return fractal_noise.generate(coord, normalize=normalize)
 
 
 def sphere_domain_warped_fbm(
@@ -584,6 +638,14 @@ def sphere_domain_warped_fbm(
 	# TODO: put domain warping inside FractalNoise
 	# TODO: use FNS built-in domain warping
 
+	# TODO: take Normalization as argument to this function
+	if normalize:
+		normalize = Normalization.full
+	elif normalize_amplitude:
+		normalize = Normalization.amplitude
+	else:
+		normalize = Normalization.none
+
 	x, y, z = _sphere_coord(height, width=width)
 
 	for idx in range(warp_steps):
@@ -598,9 +660,9 @@ def sphere_domain_warped_fbm(
 		# TODO: normalize?
 
 		nc = NoiseCoords(x, y, z)
-		x_warp = fbm_x.noise(nc)
-		y_warp = fbm_y.noise(nc)
-		z_warp = fbm_z.noise(nc)
+		x_warp = fbm_x.generate(nc)
+		y_warp = fbm_y.generate(nc)
+		z_warp = fbm_z.generate(nc)
 
 		# TODO: support math operations with NoiseCoord, instead of needing to keep track of separate x/y/z
 		x += (x_warp * warp_amount)
@@ -611,14 +673,7 @@ def sphere_domain_warped_fbm(
 
 	fractal_noise = FractalNoise(
 		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency)
-	img = fractal_noise.noise(nc)
-
-	if normalize:
-		rescale_in_place(img, range_out=(-1, 1))
-	elif normalize_amplitude:
-		img /= np.amax(np.abs(img))
-
-	return img
+	return fractal_noise.generate(nc, normalize=normalize)
 
 
 def valley_fbm(
@@ -634,29 +689,7 @@ def valley_fbm(
 		use_fns: bool = USE_FNS_DEFAULT,
 		) -> np.ndarray:
 
-	if coord is None:
-		if width is None or height is None:
-			raise ValueError('Must provide width & height if not providing coord')
-		coord = NoiseCoords.make_xy_grid(width=width, height=height)
-
-	fractal_noise = FractalNoise(
-		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
-
-	return fractal_noise.valley_noise(coord, normalize=normalize)
-
-
-def ridge_fbm(
-		seed: int,
-		coord: Optional[NoiseCoords] = None,
-		width: Optional[int] = None,
-		height: Optional[int] = None,
-		octaves: int = 8,
-		gain: float = 0.5,
-		lacunarity: float = 2.0,
-		base_frequency: float = 1.0,
-		normalize: bool = False,
-		use_fns: bool = USE_FNS_DEFAULT,
-		) -> np.ndarray:
+	normalize = Normalization.full if normalize else Normalization.amplitude
 
 	if coord is None:
 		if width is None or height is None:
@@ -664,6 +697,18 @@ def ridge_fbm(
 		coord = NoiseCoords.make_xy_grid(width=width, height=height)
 
 	fractal_noise = FractalNoise(
-		seed=seed, octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency, use_fns=use_fns)
+		seed=seed,
+		octaves=octaves, gain=gain, lacunarity=lacunarity, base_frequency=base_frequency,
+		noise_type=FbmType.valley,
+		use_fns=use_fns,
+	)
 
-	return fractal_noise.ridge_noise(coord, normalize=normalize)
+	return fractal_noise.generate(coord, normalize=normalize)
+
+
+def ridge_fbm(seed: int, **kwargs) -> np.ndarray:
+	"""
+	Generate ridge noise, i.e. 1 - valley_fbm()
+	:param kwargs: Args to forward to valley_fbm()
+	"""
+	return 1.0 - valley_fbm(seed=seed, **kwargs)
