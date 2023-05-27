@@ -413,6 +413,13 @@ def remap(
 	Equivalent to cv2.remap; only supports bilinear & nearest-neighbor interpolation
 	"""
 
+	num_dim = len(im.shape)
+
+	if num_dim == 2:
+		im = im[..., np.newaxis]
+	elif num_dim != 3:
+		raise ValueError(f'Invalid image shape for remap: {im.shape}')
+
 	if nan is None:
 		nan_map = None
 	else:
@@ -495,6 +502,10 @@ def remap(
 
 	if nan_map is not None:
 		ret[nan_map, :] = nan
+
+	if num_dim == 2:
+		assert len(ret.shape) == 3 and ret.shape[2] == 1
+		ret = ret.reshape((ret.shape[0], ret.shape[1]))
 
 	return ret
 

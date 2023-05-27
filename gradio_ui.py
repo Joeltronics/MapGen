@@ -21,7 +21,8 @@ import numpy as np
 from generation.fbm import fbm, diff_fbm, diff_fbm, valley_fbm, ridge_fbm, sphere_fbm, wrapped_fbm, domain_warped_fbm, sphere_domain_warped_fbm
 from generation.map_generation import GeneratorParams, GeneratorType, TopographyParams, TemperatureParams, ErosionParams, Planet, generate
 
-from utils.image import float_to_uint8
+from utils.image import float_to_uint8, remap
+from utils.map_projection import make_projection_map
 from utils.numeric import rescale
 from utils.utils import tprint
 
@@ -30,7 +31,7 @@ INITIAL_SEED = 0
 
 
 NOISE_TEST_CMAP_NAMES = [
-	'inferno', 'bwr', 'gist_earth', 'prism'
+	'gist_earth', 'inferno', 'bwr', 'prism'
 ]
 NOISE_TEST_CMAPS = [plt.get_cmap(name) for name in NOISE_TEST_CMAP_NAMES]
 
@@ -49,7 +50,7 @@ def gradio_callback_map_generator(
 		erosion_cell_size: float,
 		):
 
-	generator = GeneratorType[generator]
+	generator = GeneratorType(generator)
 
 	assert isinstance(seed, int)
 
@@ -126,7 +127,7 @@ def make_planet_generator_tab():
 
 			with gr.Box():
 				inputs += [
-					gr.Dropdown(choices=[generator.name for generator in GeneratorType], value=GeneratorType.planet_3d.name, label='Generator'),
+					gr.Dropdown(choices=[generator.value for generator in GeneratorType], value=GeneratorType.planet_3d.value, label='Generator'),
 					gr.Number(precision=0, value=INITIAL_SEED, label='Seed'),
 					gr.Slider(64, 3600, step=16, value=512, label='Resolution (width)'),
 				]
@@ -179,6 +180,24 @@ class FbmType(Enum):
 	ridge = 'Ridge'
 	domain_warp = 'Domain Warping'
 	domain_warp_sphere = 'Domain Warped Sphere'
+
+
+def _make_polar_azimuthal(equirectangular_texture: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+
+	# TODO: de-duplicate this from map_generation.py
+
+	# TODO: generate these directly instead of remapping equirectangular
+
+	height = equirectangular_texture.shape[0] // 2
+
+	def _make_view(lat0, lon0, orthographic):
+		xmap, ymap = make_projection_map(height, lat0=lat0, lon0=lon0, orthographic=orthographic, input_shape=equirectangular_texture.shape)
+		view = remap(equirectangular_texture, xmap, ymap, nan=0, x_bounds='wrap', y_bounds='fold', bilinear=True)
+		return view
+
+	azim_north = _make_view(lat0=90, lon0=0, orthographic=False)
+	azim_south = _make_view(lat0=-90, lon0=0, orthographic=False)
+	return np.concatenate((azim_north, azim_south), axis=1)
 
 
 def gradio_callback_noise_test(
@@ -274,11 +293,13 @@ def gradio_callback_noise_test(
 	if bipolar:
 		img = 0.5*(img + 1.0)
 
+	azimuthal = NOISE_TEST_CMAPS[0](_make_polar_azimuthal(img))
+
 	imgs_cmapped = [cmap(img) for cmap in NOISE_TEST_CMAPS]
 
 	tprint('Done converting')
 
-	return params_str, info_str, img_greyscale, img_tiled, *imgs_cmapped
+	return params_str, info_str, img_greyscale, img_tiled, azimuthal, *imgs_cmapped
 
 
 def make_noise_test_tab():
@@ -318,6 +339,7 @@ def make_noise_test_tab():
 				gr.Textbox(label='Info'),
 				gr.Image(label='Result (greyscale)'),
 				gr.Image(label='Result (tiled)'),
+				gr.Image(label='Result (Polar Azimuthal)'),
 			]
 			for cmap_name in NOISE_TEST_CMAP_NAMES:
 				outputs.append(gr.Image(label=f'Result ({cmap_name})'))

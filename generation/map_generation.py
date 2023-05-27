@@ -39,7 +39,7 @@ PI: Final = np.pi
 @unique
 class GeneratorType(Enum):
 	flat_map = '2D flat map'
-	planet_2d = '2D planet'
+	planet_2d = '2D planet'  # TODO: rename this - "cylinder" or something?
 	planet_3d = '3D planet'
 
 
