@@ -4,9 +4,7 @@ How to use:
 
 (Assuming you've gotten all of your Python dependencies installed and such)
 
-`main.py run`
-
-Then, open the printed URL (likely http://127.0.0.1:7860/) in a web browser to run the Gradio UI
+Just run `python3 main.py`. Then, open the printed URL (likely http://127.0.0.1:7860/) in a web browser to run the Gradio UI.
 
 Right now, Python 3.10 is required - in theory this should would be compatible with 3.11 as well, but it requires Numba, which does not currently support 3.11.
 
