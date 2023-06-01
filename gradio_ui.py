@@ -15,6 +15,7 @@ from enum import Enum, unique
 from typing import List, Optional, Tuple
 
 import gradio as gr
+import matplotlib
 from matplotlib import pyplot as plt
 import numpy as np
 
@@ -367,6 +368,8 @@ def parse_args(args=None):
 
 def main(args=None):
 	args = parse_args(args)
+
+	matplotlib.use('Agg')
 
 	print('Building UI...')
 	with gr.Blocks(title='Map generator') as demo:
