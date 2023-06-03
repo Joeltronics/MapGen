@@ -6,8 +6,15 @@ import numpy as np
 
 from utils.numeric import rescale, require_same_shape
 
+from .map_properties import MapProperties
+from .topography import Terrain
+from .winds import WindModel
+
 
 DEFAULT_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
+
+
+# TODO: rename rainfall -> precipitation everywhere
 
 
 def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
@@ -17,16 +24,31 @@ def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
 	# return 0.4*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.6*(np.cos(6*latitude_radians) * 0.5 + 0.5)
 
 
+class PrecipitationModel:
+	def __init__(
+			self,
+			map_properties: MapProperties,
+			terrain: Terrain,
+			wind: WindModel,
+			):
+		self._properties = map_properties
+		self._terrain = terrain
+		self._wind = wind
+
+	def process(self) -> np.ndarray:
+		pass
+
+
 def calculate_rainfall(
 		noise: np.ndarray,
-		effective_latitude_deg: np.ndarray,
+		latitude_deg: np.ndarray,
 		noise_strength=0.25,
 		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
-	require_same_shape(noise, effective_latitude_deg)
+	require_same_shape(noise, latitude_deg)
 
-	latitude = np.radians(effective_latitude_deg)
+	latitude = np.radians(latitude_deg)
 	latitude_rainfall_map = latitude_rainfall_fn(latitude)
 
 	# TODO: should this use domain warping instead of interpolation? or combination of both?
@@ -34,3 +56,12 @@ def calculate_rainfall(
 
 	rainfall_cm = rescale(rainfall_01, (0.0, 1.0), precipitation_range_cm)
 	return rainfall_cm
+
+
+def main(args=None):
+	import argparse
+
+
+
+if __name__ == "__main__":
+	main()

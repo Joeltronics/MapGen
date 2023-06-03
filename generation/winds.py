@@ -83,7 +83,7 @@ HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
 HILL_MAP_GRADIENT_SCALE: Final = 1e6
 
 
-class WindSimulation:
+class WindModel:
 	def __init__(
 			self,
 			map_properties: MapProperties,
@@ -102,15 +102,34 @@ class WindSimulation:
 
 		self._dtype = terrain.terrain_m.dtype
 
+		# Cached properties that are not @cached_property
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
-
 		self._magnitude_mps = None
 		self._dir_unit_x = None
 		self._dir_unit_y = None
 
-	# Computed properties
+		# Main output
+		self._prevailing_wind_x = None
+		self._prevailing_wind_y = None
+
+	# Main output
+
+	@property
+	def prevailing_wind_mps(self) -> tuple[np.ndarray, np.ndarray]:
+		"""
+		:returns: (wind X, wind Y) in meters per second
+		"""
+
+		if (self._prevailing_wind_x is None) or (self._prevailing_wind_y is None):
+			self.process()
+
+		assert (self._prevailing_wind_x is not None) and (self._prevailing_wind_y is not None)
+
+		return self._prevailing_wind_x, self._prevailing_wind_y
+
+	# Other computed properties
 
 	@property
 	def base_magnitude_mps(self) -> np.ndarray:
@@ -171,6 +190,9 @@ class WindSimulation:
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
+		self._magnitude_mps = None
+		self._dir_unit_x = None
+		self._dir_unit_y = None
 		del self.land_blur
 		del self.land_blur_large
 		del self.hill_map
@@ -198,13 +220,13 @@ class WindSimulation:
 		assert self._dir_unit_x is not None
 		assert self._dir_unit_y is not None
 
-		ret_x = self._magnitude_mps * self._dir_unit_x
-		ret_y = self._magnitude_mps * self._dir_unit_y
+		self._prevailing_wind_x = self._magnitude_mps * self._dir_unit_x
+		self._prevailing_wind_y = self._magnitude_mps * self._dir_unit_y
 
 		if not keep_cache:
 			self.clear_cache()
 
-		return ret_x, ret_y
+		return self._prevailing_wind_x, self._prevailing_wind_y
 
 	def _make_base_winds(self):
 
@@ -503,7 +525,7 @@ def main(args=None):
 
 		tprint('Calculating wind')
 
-		sim = WindSimulation(map_properties=map_properties, terrain=terrain)
+		sim = WindModel(map_properties=map_properties, terrain=terrain)
 		wind_x, wind_y = sim.process(keep_cache=True)
 
 		wind_mag = magnitude(wind_x, wind_y)

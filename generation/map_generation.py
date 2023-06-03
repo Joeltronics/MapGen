@@ -15,10 +15,10 @@ from PIL import Image
 from .coloring import to_image, biome_map, BIOME_GRID
 from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
 from .map_properties import MapProperties
-from .rainfall import calculate_rainfall, latitude_rainfall_fn, DEFAULT_PRECIPITATION_RANGE_CM
+from .precipitation import calculate_rainfall, latitude_rainfall_fn, DEFAULT_PRECIPITATION_RANGE_CM
 from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
 from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
-from .winds import WindSimulation, make_prevailing_wind_imgs
+from .winds import WindModel, make_prevailing_wind_imgs
 
 from utils.image import float_to_uint8, remap, matplotlib_figure_canvas_to_image, map_gradient
 from utils.map_projection import make_projection_map
@@ -480,11 +480,13 @@ def _generate(
 	"""
 	# TODO: pass in some noise for domain warping, and use this same noise for wind/temperature/rainfall
 	tprint('Calculating wind')
-	prevailing_wind_mps = WindSimulation(
+	wind_model = WindModel(
 		map_properties=map_properties,
 		terrain=terrain,
 		effective_latitude_deg=climate_effective_latitude_deg,
-	).process()
+	)
+	wind_model.process()
+	prevailing_wind_mps = wind_model.prevailing_wind_mps
 
 	tprint('Calculating temperature')
 	temperature_C = calculate_temperature(

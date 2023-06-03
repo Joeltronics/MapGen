@@ -22,6 +22,7 @@ def main():
 	subparsers.add_parser('data', help="Download & show NASA data", **common_kwarg).set_defaults(module='data')
 	subparsers.add_parser('process', help="Process NASA data", **common_kwarg).set_defaults(module='process_data')
 	subparsers.add_parser('wind', help="Test wind simulation", **common_kwarg).set_defaults(module='generation.winds')
+	subparsers.add_parser('rain', help="Test precipitation simulation", **common_kwarg).set_defaults(module='generation.precipitation')
 
 	args, remaining_args = parser.parse_known_args()
 

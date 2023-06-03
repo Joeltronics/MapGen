@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from PIL import Image
 
-from .rainfall import DEFAULT_PRECIPITATION_RANGE_CM
+from .precipitation import DEFAULT_PRECIPITATION_RANGE_CM
 from .temperature import DEFAULT_TEMPERATURE_RANGE_C
 
 from utils.image import linear_to_gamma, gamma_to_linear, float_to_uint8
