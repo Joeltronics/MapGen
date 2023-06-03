@@ -121,13 +121,20 @@ class WindModel:
 		"""
 		:returns: (wind X, wind Y) in meters per second
 		"""
-
 		if (self._prevailing_wind_x is None) or (self._prevailing_wind_y is None):
 			self.process()
-
 		assert (self._prevailing_wind_x is not None) and (self._prevailing_wind_y is not None)
-
 		return self._prevailing_wind_x, self._prevailing_wind_y
+
+	@property
+	def direction(self) -> tuple[np.ndarray, np.ndarray]:
+		"""
+		:returns (unit vector x, unit vector y)
+		"""
+		if (self._prevailing_wind_x is None) or (self._prevailing_wind_y is None):
+			self.process()
+		assert (self._dir_unit_x is not None) and (self._dir_unit_y is not None)
+		return self._dir_unit_x, self._dir_unit_y
 
 	# Other computed properties
 
@@ -191,8 +198,6 @@ class WindModel:
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
 		self._magnitude_mps = None
-		self._dir_unit_x = None
-		self._dir_unit_y = None
 		del self.land_blur
 		del self.land_blur_large
 		del self.hill_map
