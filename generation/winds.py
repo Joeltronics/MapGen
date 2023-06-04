@@ -448,92 +448,24 @@ def main(args=None):
 	from matplotlib.gridspec import GridSpec
 	from matplotlib.axes import Axes
 
+	from .test_datasets import get_test_datasets
+
 	parser = argparse.ArgumentParser()
 	mx = parser.add_mutually_exclusive_group()
 	mx.add_argument('--circle', dest='circle_only', action='store_true', help='Only run circle test')
 	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
 	args = parser.parse_args(args)
 
-	CIRCLE_MAG: Final = 6000
-
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
-	earth_topography_m = None
-	na_lat_range = na_lon_range = na_topography_m = None
-	if not args.circle_only:
-		tprint('Loading Earth data...')
-		from data import data
-		earth_topography_m = data.get_topography()
-
-		na_lat_range = (10, 65)
-		na_lon_range = (-135, -45)
-		na_y_range = (
-			round(rescale(na_lat_range[1], (90, -90), (0, earth_topography_m.shape[0]))),
-			round(rescale(na_lat_range[0], (90, -90), (0, earth_topography_m.shape[0]))))
-		na_x_range = (
-			round(rescale(na_lon_range[0], (-180, 180), (0, earth_topography_m.shape[1]))),
-			round(rescale(na_lon_range[1], (-180, 180), (0, earth_topography_m.shape[1]))))
-		na_topography_m = earth_topography_m[na_y_range[0] : 1 + na_y_range[1], na_x_range[0] : 1 + na_x_range[1]]
-		assert len(na_topography_m.shape) == 2 and na_topography_m.shape[0] > 0 and na_topography_m.shape[1] > 0, f"{na_topography_m.shape=}"
-
-	x = np.linspace(-4.0, 4.0, 512)
-	y = np.linspace(-4.0, 4.0, 512)
-	x, y = np.meshgrid(x, y)
-	r = magnitude(x, y)
-	circle_data = np.full((512, 512), -CIRCLE_MAG, dtype=np.float32)
-	circle_data[r <= 1.0] = CIRCLE_MAG
-	circle_data_latitude_range = (30, 60)
-
-	datasets = []
-
-	if args.fullres:
-		datasets += [
-			dict(
-				title=f'Earth, {earth_topography_m.shape[1]}x{earth_topography_m.shape[0]}',
-				source_data=earth_topography_m,
-				flat_map=False,
-				high_res_arrows=True,
-			)
-		]
-
-	if not args.circle_only:
-		datasets += [
-			dict(
-				title='Earth, 1024x512',
-				source_data=earth_topography_m,
-				resolution=(512, 1024),
-				flat_map=False,
-			),
-			dict(
-				title='Earth, 256x128',
-				source_data=earth_topography_m,
-				resolution=(128, 256),
-				flat_map=False,
-			),
-			dict(
-				title='Earth, 1024x512, flat',
-				source_data=earth_topography_m,
-				resolution=(512, 1024),
-				flat_map=True,
-			),
-			dict(
-				title='North America (flat)',
-				source_data=na_topography_m,
-				latitude_range=na_lat_range,
-				longitude_range=na_lon_range,
-				flat_map=True,
-			),
-		]
-	
-	datasets += [
-		dict(
-			title='Circle test',
-			source_data=circle_data,
-			latitude_range=circle_data_latitude_range,
-			flat_map=True,
-		),
-	]
+	datasets = get_test_datasets(
+		full_res_earth = args.fullres,
+		lower_res_earch = not args.circle_only,
+		earth_flat = not args.circle_only,
+		north_america = not args.circle_only,
+		circle = True,
+	)
 
 	for dataset in datasets:
 		dataset_title = dataset['title']
