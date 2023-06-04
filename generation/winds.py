@@ -116,6 +116,8 @@ class WindModel:
 
 	# Main output
 
+	# TODO: rename these to be more consistent
+
 	@property
 	def prevailing_wind_mps(self) -> tuple[np.ndarray, np.ndarray]:
 		"""
@@ -125,6 +127,13 @@ class WindModel:
 			self.process()
 		assert (self._prevailing_wind_x is not None) and (self._prevailing_wind_y is not None)
 		return self._prevailing_wind_x, self._prevailing_wind_y
+
+	@property
+	def magnitude_mps(self) -> np.ndarray:
+		if self._magnitude_mps is None:
+			self.process()
+		assert self._magnitude_mps is not None
+		return self._magnitude_mps
 
 	@property
 	def direction(self) -> tuple[np.ndarray, np.ndarray]:
@@ -197,7 +206,6 @@ class WindModel:
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
-		self._magnitude_mps = None
 		del self.land_blur
 		del self.land_blur_large
 		del self.hill_map
@@ -533,9 +541,8 @@ def main(args=None):
 		sim = WindModel(map_properties=map_properties, terrain=terrain)
 		wind_x, wind_y = sim.process(keep_cache=True)
 
-		wind_mag = magnitude(wind_x, wind_y)
-		wind_x_norm = wind_x / wind_mag
-		wind_y_norm = wind_y / wind_mag
+		wind_mag = sim.magnitude_mps
+		wind_x_norm, wind_y_norm = sim.direction
 
 		tprint('Calculating divergence')
 
