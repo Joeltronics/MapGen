@@ -10,9 +10,14 @@ from utils.utils import tprint
 
 CIRCLE_MAG: Final = 6000
 
+AFRICA_LAT_RANGE = (-40, 40)
+AFRICA_LON_RANGE = (-30, 60)
 
 NA_LAT_RANGE = (10, 65)
 NA_LON_RANGE = (-135, -45)
+
+SA_LAT_RANGE = (-60, 20)
+SA_LON_RANGE = (-90, -30)
 
 
 def _get_region(
@@ -49,11 +54,13 @@ def get_test_datasets(
 		full_res_earth = False,
 		lower_res_earch = False,
 		earth_flat = False,
+		africa = False,
 		north_america = False,
+		south_america = False,
 		circle = False,
 		) -> list[dict]:
 
-	any_earth = any([full_res_earth, lower_res_earch, earth_flat, north_america])
+	any_earth = any([full_res_earth, lower_res_earch, earth_flat, africa, north_america, south_america])
 
 	earth_topography_m = None
 	if any_earth:
@@ -107,16 +114,32 @@ def get_test_datasets(
 			),
 		]
 
+	if africa:
+		datasets.append(dict(
+			title='Africa (flat)',
+			source_data=_get_region(earth_topography_m, lat_range=AFRICA_LAT_RANGE, lon_range=AFRICA_LON_RANGE),
+			latitude_range=AFRICA_LAT_RANGE,
+			longitude_range=AFRICA_LON_RANGE,
+			flat_map=True,
+		))
+
 	if north_america:
-		datasets += [
-			dict(
-				title='North America (flat)',
-				source_data=_get_region(earth_topography_m, lat_range=NA_LAT_RANGE, lon_range=NA_LON_RANGE),
-				latitude_range=NA_LAT_RANGE,
-				longitude_range=NA_LON_RANGE,
-				flat_map=True,
-			),
-		]
+		datasets.append(dict(
+			title='North America (flat)',
+			source_data=_get_region(earth_topography_m, lat_range=NA_LAT_RANGE, lon_range=NA_LON_RANGE),
+			latitude_range=NA_LAT_RANGE,
+			longitude_range=NA_LON_RANGE,
+			flat_map=True,
+		))
+
+	if south_america:
+		datasets.append(dict(
+			title='South America (flat)',
+			source_data=_get_region(earth_topography_m, lat_range=SA_LAT_RANGE, lon_range=SA_LON_RANGE),
+			latitude_range=SA_LAT_RANGE,
+			longitude_range=SA_LON_RANGE,
+			flat_map=True,
+		))
 
 	if circle:
 		datasets += [

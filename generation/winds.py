@@ -656,13 +656,10 @@ def main(args=None):
 		wind_elevation_im = terrain.elevation_m.copy()
 		wind_elevation_im[topography_m < 0] = -1000.
 
-		# TODO: is it possible to overlay this with elevation, without it looking messy?
-		# ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
-		ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
-
+		ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind')
 		_plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
 
-		# TODO: make this less ugly
+		# TODO: make the arrows less ugly
 		ax_wind.quiver(
 			arrow_locs_x, arrow_locs_y, base_dir_arrows_x, base_dir_arrows_y,
 			color='red', alpha=0.75, **quiver_kwargs)

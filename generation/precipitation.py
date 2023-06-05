@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 from functools import cached_property
-from typing import Final
+from typing import Final, Optional
 
 import numpy as np
 
 from utils.image import resize_array
-from utils.numeric import rescale, require_same_shape, magnitude
+from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape
 from utils.utils import tprint
 
 from .map_properties import MapProperties
@@ -28,19 +28,23 @@ def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
 
 
 def _calculate_rainfall(
-		noise: np.ndarray,
+		noise: Optional[np.ndarray],
 		latitude_deg: np.ndarray,
 		noise_strength=0.25,
 		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
-	require_same_shape(noise, latitude_deg)
+	if noise is not None:
+		require_same_shape(noise, latitude_deg)
 
 	latitude = np.radians(latitude_deg)
 	latitude_rainfall_map = latitude_rainfall_fn(latitude)
 
-	# TODO: should this use domain warping instead of interpolation? or combination of both?
-	rainfall_01 = noise * noise_strength + latitude_rainfall_map * (1.0 - noise_strength)
+	if noise_strength > 0:
+		# TODO: should this use domain warping instead of interpolation? or combination of both?
+		rainfall_01 = noise * noise_strength + latitude_rainfall_map * (1.0 - noise_strength)
+	else:
+		rainfall_01 = latitude_rainfall_map
 
 	rainfall_cm = rescale(rainfall_01, (0.0, 1.0), precipitation_range_cm)
 	return rainfall_cm
@@ -53,7 +57,7 @@ class PrecipitationModel:
 			terrain: Terrain,
 			wind: WindModel,
 			*,
-			effective_latitude_deg: np.ndarray,
+			effective_latitude_deg: Optional[np.ndarray],
 			noise: np.ndarray,
 			noise_strength = 0.25,
 			precipitation_range_cm = DEFAULT_PRECIPITATION_RANGE_CM,
@@ -61,19 +65,29 @@ class PrecipitationModel:
 		self._properties = map_properties
 		self._terrain = terrain
 		self._wind = wind
-		self._effective_latitude_deg = effective_latitude_deg
+		# TODO optimization: use map_properties.latitude_column instead
+		self._effective_latitude_deg = effective_latitude_deg if (effective_latitude_deg is not None) else map_properties.latitude_map
 		self._noise = noise
 		self._noise_strength = noise_strength
 
-		# TODO: this is now base precipitation range, it should probably be lower now that we're adding orographic
+		# TODO: this is now *base* precipitation range, it should probably be lower now that orographic can add extra
 		self._precipitation_range_cm = precipitation_range_cm
 
+		self._precipitation_cm = None
+
+	@property
+	def precipitation_cm(self) -> np.ndarray:
+		if self._precipitation_cm is None:
+			self.process()
+		assert self._precipitation_cm is not None
+		return self._precipitation_cm
+
 	@cached_property
-	def base_rain_cm(self):
+	def base_precipitation_cm(self):
 		# Older naive calculation
 		return _calculate_rainfall(
 			noise=self._noise,
-			latitude_deg=self._latitude_deg,
+			latitude_deg=self._effective_latitude_deg,
 			noise_strength=self._noise_strength,
 			precipitation_range_cm=self._precipitation_range_cm,
 		)
@@ -89,32 +103,36 @@ class PrecipitationModel:
 		# Orographic rainfall (where wind is going uphill)
 		OROGRAPHIC_RAIN_SCALE = 10.
 		# TODO: should the max be capped here?
-		orographic_rain = np.maximum(0, -self.wind_dir_dot_gradient)
+		orographic_rain = np.maximum(0, self.wind_dir_dot_gradient)
 		# TODO: should this be a 1/x scale instead of linear?
 		return 1 + OROGRAPHIC_RAIN_SCALE*orographic_rain
 
 	def clear_cache(self):
-		del self.base_rain_cm
+		del self.base_precipitation_cm
 		del self.wind_dir_dot_gradient
 
 	def process(self, keep_cache=False) -> np.ndarray:
 
 		# Older naive calculation
 
-		base_rain_cm = self.base_rain_cm
+		base_precipitation_cm = self.base_precipitation_cm
+
+		# TODO: probably makes more sense to do most stuff after this in log domain
 
 		# Orographic rainfall (where wind is going uphill)
 
-		rain_cm = base_rain_cm * self.orographic_precipitation_scale
+		rain_cm = base_precipitation_cm * self.orographic_precipitation_scale
 
 		# Rain shadows
 
 		# TODO
 
+		self._precipitation_cm = rain_cm
+
 		if not keep_cache:
 			self.clear_cache()
 
-		return rain_cm
+		return self._precipitation_cm
 
 
 def calculate_rainfall(
@@ -134,7 +152,9 @@ def calculate_rainfall(
 def main(args=None):
 	import argparse
 
+	import matplotlib
 	from matplotlib import pyplot as plt
+	from matplotlib import colors
 	from matplotlib.gridspec import GridSpec
 	from matplotlib.axes import Axes
 
@@ -151,11 +171,15 @@ def main(args=None):
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
+	# FIXME: something is off with south america here, it seems the latitude might be inverted?
+
 	datasets = get_test_datasets(
 		full_res_earth = args.fullres,
 		lower_res_earch = not args.circle_only,
 		earth_flat = not args.circle_only,
+		africa = not args.circle_only,
 		north_america = not args.circle_only,
+		south_america = not args.circle_only,
 		circle = True,
 	)
 
@@ -198,8 +222,127 @@ def main(args=None):
 		wind_sim = WindModel(map_properties=map_properties, terrain=terrain)
 		wind_x, wind_y = wind_sim.process()
 
-		# TODO
+		tprint('Calculating rain')
 
+		rain_sim = PrecipitationModel(
+			map_properties=map_properties,
+			terrain=terrain,
+			wind=wind_sim,
+			effective_latitude_deg=None,
+			noise=None,
+			noise_strength=0.0,
+		)
+		rain_sim.process(keep_cache=True)
+
+		delta_precip = rain_sim.precipitation_cm / rain_sim.base_precipitation_cm
+
+		tprint('Calculating wind arrows to plot')
+
+		max_arrows_height = MAX_ARROWS_HEIGHT_HIGH_RES if high_res_arrows else MAX_ARROWS_HEIGHT_STANDARD
+		if height >= max_arrows_height:
+			arrows_height = max_arrows_height
+			arrows_width = round(max_arrows_height * width / height)
+		else:
+			arrows_width = width
+			arrows_height = height
+
+		arrows_size = (arrows_width, arrows_height)
+		arrows_x = resize_array(wind_x, new_size=arrows_size)
+		arrows_y = resize_array(wind_y, new_size=arrows_size)
+
+		arrow_mags = magnitude(arrows_x, arrows_y)
+		assert np.amin(arrow_mags) > 0
+		arrows_x_norm = arrows_x / arrow_mags
+		arrows_y_norm = arrows_y / arrow_mags
+
+		arrow_locs_x = linspace_midpoint(longitude_range[0], longitude_range[1], arrows_x.shape[1])
+		arrow_locs_y = linspace_midpoint(latitude_range[1], latitude_range[0], arrows_x.shape[0])
+		arrow_step = abs(arrow_locs_y[1] - arrow_locs_y[0])
+		arrow_locs_x, arrow_locs_y = np.meshgrid(arrow_locs_x, arrow_locs_y)
+
+		base_wind_x, base_wind_y = wind_sim.base_winds_mps
+		base_dir_arrows_x = resize_array(base_wind_x, new_size=arrows_size)
+		base_dir_arrows_y = resize_array(base_wind_y, new_size=arrows_size)
+		mag = magnitude(base_dir_arrows_x, base_dir_arrows_y)
+		base_dir_arrows_x /= mag
+		base_dir_arrows_y /= mag
+
+		quiver_kwargs = dict(
+			pivot="middle", angles="xy",
+			scale=1/arrow_step, scale_units="y",
+			width=arrow_step/10, units="y",
+		)
+
+		tprint('Plotting')
+
+		fig = plt.figure()
+		gs = GridSpec(3, 4, figure=fig)
+
+		def _plot(
+				pos_or_axes,
+				data: np.ndarray,
+				title: str = '',
+				colorbar = True,
+				colorbar_loc = 'bottom',
+				grid = False,
+				add_range_to_title=True,
+				cmap = 'viridis',
+				**kwargs):
+
+			if isinstance(pos_or_axes, Axes):
+				ax = pos_or_axes
+			else:
+				ax = fig.add_subplot(pos_or_axes)
+
+			im = ax.imshow(
+				data,
+				extent=(longitude_range[0], longitude_range[1], latitude_range[0], latitude_range[1]),
+				cmap=cmap,
+				**kwargs)
+
+			if colorbar:
+				fig.colorbar(im, ax=ax, location=colorbar_loc)
+
+			if grid:
+				ax.grid()
+
+			if add_range_to_title:
+				if title:
+					title += ' '
+				dr = data_range(data)
+				title += f'[{dr[0]:.2g}, {dr[1]:.2g}]'
+
+			if title:
+				ax.set_title(title)
+
+			return ax
+
+		fig.suptitle(dataset_title)
+
+		_plot(gs[0, 0], terrain.elevation_m, title='Elevation (m)', cmap='inferno')
+		_plot(gs[0, 1], terrain.elevation_100km, title='Elevation blur', cmap='inferno')
+
+		# TODO: center colormap around zero
+		_plot(gs[0, 2], rain_sim.wind_dir_dot_gradient, title='Wind dir dot gradient', cmap='bwr')
+
+		ax_main = _plot(gs[1:3, 0:2], rain_sim.precipitation_cm, title='Precipitation/Wind/Elevation')
+		_plot(ax_main, terrain.elevation_m, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+		ax_main.quiver(
+			arrow_locs_x, arrow_locs_y, arrows_x_norm, arrows_y_norm,
+			color='white', alpha=0.75, **quiver_kwargs)
+
+		_plot(gs[1, 2], rain_sim.base_precipitation_cm, title='Base')
+		_plot(gs[1, 3], delta_precip, title='Final / Base', cmap='Spectral',
+			# norm=colors.LogNorm(vmin=1e-1, vmax=1e1),
+		)
+
+		# _plot(gs[0, 3], rain_sim.orographic_precipitation_scale, title='Orographic')
+
+		# TODO: more
+
+	print()
+	tprint('Showing plots')
+	plt.show()
 
 
 

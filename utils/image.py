@@ -832,7 +832,7 @@ def gaussian_blur_map(
 	"""
 
 	resize_before = bool(resize)
-	resize_after = (resize.lower() == 'internal')
+	resize_after = (isinstance(resize, str) and resize.lower() == 'internal')
 
 	if isclose(latitude_span, 180):
 		latitude_span = 180
