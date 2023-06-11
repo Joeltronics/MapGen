@@ -17,6 +17,10 @@ from .winds import WindModel
 DEFAULT_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
 
 
+# OROGRAPHIC_PRECIP_SCALE = 10.
+OROGRAPHIC_PRECIP_SCALE = 100.
+
+
 # TODO: rename rainfall -> precipitation everywhere
 
 
@@ -96,16 +100,16 @@ class PrecipitationModel:
 	def wind_dir_dot_gradient(self):
 		wind_x, wind_y = self._wind.direction
 		gradient_x, gradient_y = self._terrain.gradient_100km
+		# TODO: blur this
+		# Even though terrain gradient is already blurred, wind isn't and has weird convergence/divergence behavior
 		return wind_x * gradient_x + wind_y * gradient_y
 
 	@cached_property
 	def orographic_precipitation_scale(self):
 		# Orographic rainfall (where wind is going uphill)
-		OROGRAPHIC_RAIN_SCALE = 10.
 		# TODO: should the max be capped here?
-		orographic_rain = np.maximum(0, self.wind_dir_dot_gradient)
 		# TODO: should this be a 1/x scale instead of linear?
-		return 1 + OROGRAPHIC_RAIN_SCALE*orographic_rain
+		return 1 + OROGRAPHIC_PRECIP_SCALE*np.maximum(0, self.wind_dir_dot_gradient)
 
 	def clear_cache(self):
 		del self.base_precipitation_cm
@@ -165,22 +169,28 @@ def main(args=None):
 	parser = argparse.ArgumentParser()
 	mx = parser.add_mutually_exclusive_group()
 	mx.add_argument('--circle', dest='circle_only', action='store_true', help='Only run circle test')
+	mx.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
 	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
 	args = parser.parse_args(args)
 
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
-	# FIXME: something is off with south america here, it seems the latitude might be inverted?
+	standard_res_earth = not (args.circle_only or args.fullres)
+	lower_res_earth = args.multires
+	earth_regions = standard_res_earth
+	circle = args.circle_only or not args.fullres
 
 	datasets = get_test_datasets(
-		full_res_earth = args.fullres,
-		lower_res_earch = not args.circle_only,
-		earth_flat = not args.circle_only,
-		africa = not args.circle_only,
-		north_america = not args.circle_only,
-		south_america = not args.circle_only,
-		circle = True,
+		earth_3600 = args.fullres,
+		earth_1024 = standard_res_earth,
+		earth_256 = lower_res_earth,
+		earth_1024_flat = lower_res_earth,
+		africa = earth_regions,
+		north_america = earth_regions,
+		south_america = earth_regions,
+		pacific_northwest = earth_regions,
+		circle = circle,
 	)
 
 	for dataset in datasets:
@@ -325,14 +335,18 @@ def main(args=None):
 		# TODO: center colormap around zero
 		_plot(gs[0, 2], rain_sim.wind_dir_dot_gradient, title='Wind dir dot gradient', cmap='bwr')
 
+		elevation_im = terrain.elevation_m.copy()
+		elevation_im[elevation_im < 0] = -1000.
+
 		ax_main = _plot(gs[1:3, 0:2], rain_sim.precipitation_cm, title='Precipitation/Wind/Elevation')
-		_plot(ax_main, terrain.elevation_m, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+		# _plot(ax_main, terrain.elevation_m, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+		_plot(ax_main, elevation_im, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
 		ax_main.quiver(
 			arrow_locs_x, arrow_locs_y, arrows_x_norm, arrows_y_norm,
-			color='white', alpha=0.75, **quiver_kwargs)
+			color='white', alpha=0.25, **quiver_kwargs)
 
 		_plot(gs[1, 2], rain_sim.base_precipitation_cm, title='Base')
-		_plot(gs[1, 3], delta_precip, title='Final / Base', cmap='Spectral',
+		_plot(gs[1, 3], delta_precip, title='Relative to Base', cmap='Spectral',
 			# norm=colors.LogNorm(vmin=1e-1, vmax=1e1),
 		)
 

@@ -40,6 +40,7 @@ IMPEDANCE_CMAP = plt.get_cmap('RdYlBu')
 DIV_CMAP = plt.get_cmap('bwr')
 
 
+# Direction is Cartesian angle, not screen-space (i.e. N = 90 = +Y)
 # Direction is based on linear interpolation, so wrapping around won't work
 BASE_WIND_STRENGTH_DIR_BY_LATITUDE: Final = [
 	# Polar cells
@@ -59,8 +60,9 @@ BASE_WIND_STRENGTH_DIR_BY_LATITUDE: Final = [
 
 	# Hadley cells
 	(29.0,  6.5, -90),  # S
-	(15.0,   8.0, -135),  # SW
-	(-0.001, 4.5, -180),  # W
+	# (15.0,   8.0, -135),  # SW
+	# (-0.001, 4.5, -180),  # W
+	(-0.001, 4.5, -135),  # W
 ]
 
 _wind_strength_interpolator = scipy.interpolate.interp1d(
@@ -488,18 +490,26 @@ def main(args=None):
 	parser = argparse.ArgumentParser()
 	mx = parser.add_mutually_exclusive_group()
 	mx.add_argument('--circle', dest='circle_only', action='store_true', help='Only run circle test')
+	mx.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
 	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
 	args = parser.parse_args(args)
 
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
+	standard_res_earth = not (args.circle_only or args.fullres)
+	lower_res_earth = args.multires
+	earth_regions = standard_res_earth
+	circle = args.circle_only or not args.fullres
+
 	datasets = get_test_datasets(
-		full_res_earth = args.fullres,
-		lower_res_earch = not args.circle_only,
-		earth_flat = not args.circle_only,
-		north_america = not args.circle_only,
-		circle = True,
+		earth_3600 = args.fullres,
+		earth_1024 = standard_res_earth,
+		earth_256 = lower_res_earth,
+		earth_1024_flat = lower_res_earth,
+		north_america = earth_regions,
+		south_america = earth_regions,
+		circle = circle,
 	)
 
 	for dataset in datasets:
