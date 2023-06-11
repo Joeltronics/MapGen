@@ -30,7 +30,7 @@ class MapProperties:
 		self._flat = flat
 		self._height = height
 		self._width = width
-		self._longitude_range = longitude_range
+		self._longitude_range = sorted(longitude_range) if longitude_range is not None else None
 		self._noise_coord = noise_coord
 
 		if self._width is None:
@@ -45,7 +45,7 @@ class MapProperties:
 			half_longitude_span = 0.5 * self.latitude_span * self._width / self._height
 			self._longitude_range = (-half_longitude_span, half_longitude_span)
 
-		assert (self._width is not None) and (self._longitude_range is not None)
+		assert (self._width is not None) and (self._longitude_range is not None) and (self._longitude_range[1] > self._longitude_range[0])
 
 	# Simple getter properties
 
@@ -71,11 +71,11 @@ class MapProperties:
 
 	@property
 	def north(self) -> float:
-		return self._latitude_range[0]
+		return self._latitude_range[1]
 
 	@property
 	def south(self) -> float:
-		return self._latitude_range[1]
+		return self._latitude_range[0]
 
 	@property
 	def east(self) -> float:
