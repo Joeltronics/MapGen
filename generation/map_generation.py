@@ -15,7 +15,7 @@ from PIL import Image
 from .coloring import to_image, biome_map, BIOME_GRID
 from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
 from .map_properties import MapProperties
-from .precipitation import calculate_rainfall, latitude_rainfall_fn, DEFAULT_PRECIPITATION_RANGE_CM
+from .precipitation import calculate_rainfall, latitude_rainfall_fn
 from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
 from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
 from .winds import WindModel, make_prevailing_wind_imgs
@@ -499,6 +499,7 @@ def _generate(
 	)
 
 	tprint('Calculating Rainfall')
+	# TODO: Use PrecipitationModel instead
 	rainfall_cm = calculate_rainfall(rainfall_noise, effective_latitude_deg=climate_effective_latitude_deg)
 
 	tprint('Generating graphs')

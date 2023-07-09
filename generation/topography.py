@@ -65,6 +65,24 @@ class Terrain:
 	def land_mask(self) -> np.ndarray:
 		return self._terrain_m >= 0
 
+	def gradient_at_scale(self, scale_km) -> tuple[np.ndarray, np.ndarray]:
+		return map_gradient(
+			self.elevation_m,
+			sigma_km=scale_km,
+			flat_map=self._map_properties.flat,
+			latitude_span=self._map_properties.latitude_span,
+			magnitude=False,
+		)
+
+	def gradient_magnitude_at_scale(self, scale_km) -> np.ndarray:
+		return map_gradient(
+			self.elevation_m,
+			sigma_km=scale_km,
+			flat_map=self._map_properties.flat,
+			latitude_span=self._map_properties.latitude_span,
+			magnitude=True,
+		)
+
 	@cached_property
 	def gradient(self) -> tuple[np.ndarray, np.ndarray]:
 		return map_gradient(self.elevation_m, flat_map=self._map_properties.flat, magnitude=False, latitude_span=self._map_properties.latitude_span)
@@ -80,11 +98,13 @@ class Terrain:
 	@cached_property
 	def gradient_100km(self) -> tuple[np.ndarray, np.ndarray]:
 		# TODO: can use elevation_100km for this
-		return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=False, latitude_span=self._map_properties.latitude_span)
+		# return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=False, latitude_span=self._map_properties.latitude_span)
+		return self.gradient_at_scale(scale_km=100)
 
 	@cached_property
 	def gradient_magnitude_100km(self) -> np.ndarray:
-		return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=True, latitude_span=self._map_properties.latitude_span)
+		# return map_gradient(self.elevation_m, sigma_km=100, flat_map=self._map_properties.flat, magnitude=True, latitude_span=self._map_properties.latitude_span)
+		return self.gradient_magnitude_at_scale(scale_km=100)
 
 
 def get_earth_topography(map_properties: MapProperties) -> Terrain:

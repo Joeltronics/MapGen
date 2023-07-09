@@ -81,7 +81,8 @@ REDUCE_WIND_SPEED_ON_LAND: Final = 4.0
 MAX_GRADIENT_DIRECTION_SHIFT: Final = 0.75
 MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL: Final = 0.5
 HILL_MAP_LAND_SCALE: Final = 2.0
-HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
+# HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
+HILL_MAP_ELEVATION_SCALE: Final = 0.  # TEMPORARY: set to 0 while working on orographic rainfall
 HILL_MAP_GRADIENT_SCALE: Final = 1e6
 
 
@@ -639,13 +640,10 @@ def main(args=None):
 			if grid:
 				ax.grid()
 
-			if add_range_to_title:
-				if title:
-					title += ' '
-				dr = data_range(data)
-				title += f'[{dr[0]:.2g}, {dr[1]:.2g}]'
-
 			if title:
+				if add_range_to_title:
+					dr = data_range(data)
+					title += f' [{dr[0]:.2g}, {dr[1]:.2g}]'
 				ax.set_title(title)
 
 			return ax
@@ -666,8 +664,11 @@ def main(args=None):
 		wind_elevation_im = terrain.elevation_m.copy()
 		wind_elevation_im[topography_m < 0] = -1000.
 
-		ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind')
-		_plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+		# ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind')
+		# _plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False)
+
+		ax_wind = _plot(gs[1:3, 0:2], wind_elevation_im, cmap='gray', colorbar=False)
+		_plot(ax_wind, wind_mag, vmin=1.0, vmax=12.0, alpha=0.75, cmap='viridis', title='Wind')
 
 		# TODO: make the arrows less ugly
 		ax_wind.quiver(

@@ -75,7 +75,7 @@ def rescale(
 		else:
 			range_in = data_range(val)
 
-	if range_in[0] == range_in[1]:
+	elif range_in[0] == range_in[1]:
 		ret = 0.5*(range_out[0] + range_out[1])
 		if scalar:
 			return ret
@@ -88,18 +88,23 @@ def rescale(
 	if (not scalar) and (not in_place):
 		val = np.copy(val)
 
-	if range_in != (0., 1.):
+	# These optimizations might seem pointless, but this function is mainly designed for use with large arrays
+
+	if range_in[0] != 0:
 		val -= range_in[0]
+
+	if range_in[1] - range_in[0] != 1:
 		val /= (range_in[1] - range_in[0])
 
-	if clip:
-		if scalar:
-			val = np.clip(val, 0., 1.)
-		else:
-			np.clip(val, 0., 1., out=val)
+	if clip and scalar:
+		val = np.clip(val, 0., 1.)
+	elif clip:
+		np.clip(val, 0., 1., out=val)
 
-	if range_out != (0., 1.):
+	if range_out[1] - range_out[0] != 1:
 		val *= (range_out[1] - range_out[0])
+
+	if range_out[0] != 0:
 		val += range_out[0]
 
 	return val
@@ -137,6 +142,8 @@ def rescale_in_place(
 
 	if range_out != (0., 1.):
 		val *= (range_out[1] - range_out[0])
+
+	if range_out[0]:
 		val += range_out[0]
 
 

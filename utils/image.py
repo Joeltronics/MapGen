@@ -16,7 +16,7 @@ from PIL import Image
 import scipy.ndimage
 
 import utils.numeric
-from utils.numeric import rescale, data_range, max_abs, magnitude, linspace_midpoint, require_same_shape
+from utils.numeric import rescale, data_range, max_abs, linspace_midpoint, require_same_shape
 
 from utils.consts import PI, TWOPI, EARTH_POLAR_CIRCUMFERENCE_M, EARTH_POLAR_CIRCUMFERENCE_KM, EARTH_EQUATORIAL_CIRCUMFERENCE_M
 
@@ -669,7 +669,7 @@ def gradient(
 	assert gradient_x.shape == gradient_y.shape == (height, width)
 
 	if magnitude:
-		gradient_mag = magnitude(gradient_x, gradient_y)
+		gradient_mag = utils.numeric.magnitude(gradient_x, gradient_y)
 		if auto_scale:
 			gradient_mag = rescale(gradient_mag)
 		return gradient_mag
@@ -791,7 +791,7 @@ def sphere_gradient(
 	assert gradient_x.shape == gradient_y.shape == (height, width)
 
 	if magnitude:
-		gradient_mag = magnitude(gradient_x, gradient_y)
+		gradient_mag = utils.numeric.magnitude(gradient_x, gradient_y)
 		if auto_scale:
 			gradient_mag = rescale(gradient_mag, data_range(gradient_mag), (0., 1.))
 		return gradient_mag
