@@ -29,6 +29,10 @@ def max_abs(x: np.ndarray, /) -> float:
 	return np.amax(np.abs(x))
 
 
+def gaussian(x, mu, sigma):
+	return np.exp(-np.square(x - mu) / (2 * np.square(sigma)))
+
+
 def lerp(x: FloatOrArrayT, /, range: Tuple[float, float]) -> FloatOrArrayT:
 	return range[0]*(1-x) + range[1]*x
 

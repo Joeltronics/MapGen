@@ -5,8 +5,9 @@ from typing import Final, Optional
 
 import numpy as np
 
+from utils.consts import EARTH_POLAR_CIRCUMFERENCE_M, TWOPI
 from utils.image import resize_array, gaussian_blur_map
-from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape, max_abs
+from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape, max_abs, gaussian
 from utils.utils import tprint
 
 from .map_properties import MapProperties
@@ -31,6 +32,31 @@ def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
 	# return (np.cos(2 * latitude_radians) * 0.5 + 0.5) * (np.cos(6 * latitude_radians) * 0.5 + 0.5)
 	return 0.5*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.5*(np.cos(6*latitude_radians) * 0.5 + 0.5)
 	# return 0.4*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.6*(np.cos(6*latitude_radians) * 0.5 + 0.5)
+
+
+def latitude_orographic_fn(latitude_radians: np.ndarray, sigma_km: float = 100.) -> np.ndarray:
+	"""
+	Less orographic & rain shadow at the equator/tropics/circle/pole, because:
+	a) Much of the rainfall behavior at these latitudes is due to edges of wind cells causing air to rise/fall, and this
+		is already accounted for by base rainfall
+	b) Rain ,odel doesn't really work at these points:
+		- It uses static wind vectors (i.e. essentially acting as if the jet stream never moves)
+		- Using dot product with blurred latitude assumes the wind was moving a roughly similar direction over the
+			entire blur scale; edges of cells are big sudden changes in direction
+	"""
+
+	sigma = (sigma_km * 1000) / EARTH_POLAR_CIRCUMFERENCE_M * TWOPI
+
+	ret = None
+	for latitude in [-90, -60, -30, 0, 30, 60, 90]:
+		mu = np.radians(latitude)
+		layer = 1.0 - gaussian(latitude_radians, mu=mu, sigma=sigma)
+		if ret is None:
+			ret = layer
+		else:
+			ret *= layer
+
+	return ret
 
 
 def _calculate_rainfall_basic(
@@ -101,18 +127,22 @@ class PrecipitationModel:
 		gradient_x, gradient_y = self._terrain.gradient_100km
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
-	def wind_dir_dot_gradient_at_scale(self, scale_km):
+	@cached_property
+	def wind_dir_dot_gradient_1000km(self):
 		wind_x, wind_y = self._wind.direction
-		# gradient_x, gradient_y = self._terrain.gradient_1000km
-		gradient_x, gradient_y = self._terrain.gradient_at_scale(scale_km=scale_km)
+		gradient_x, gradient_y = self._terrain.gradient_1000km
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
-	# @cached_property
-	# def wind_dir_dot_gradient_1000km(self):
-	# 	wind_x, wind_y = self._wind.direction
-	# 	# gradient_x, gradient_y = self._terrain.gradient_1000km
-	# 	gradient_x, gradient_y = self._terrain.gradient_at_scale(1000)
-	# 	return (wind_x * gradient_x) + (wind_y * gradient_y)
+	def wind_dir_dot_gradient_at_scale(self, scale_km):
+
+		if scale_km == 100:
+			return self.wind_dir_dot_gradient_100km
+		elif scale_km == 1000:
+			return self.wind_dir_dot_gradient_1000km
+
+		wind_x, wind_y = self._wind.direction
+		gradient_x, gradient_y = self._terrain.gradient_at_scale(scale_km=scale_km)
+		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
 	@cached_property
 	def orographic_precipitation_scale_log10(self):
@@ -138,6 +168,8 @@ class PrecipitationModel:
 			in_place=True,
 		)
 
+		rain *= latitude_orographic_fn(latitude_radians=self._properties.latitude_column_radians, sigma_km=100)
+
 		return rain
 
 	@cached_property
@@ -157,50 +189,42 @@ class PrecipitationModel:
 		"""
 		TODO: get MAX_SCALES working properly
 
-		TODO: explain why we want this
+		Seems like it would give more realistic results - e.g. it would help with a small valley in a much bigger slope
 
-		Enabling it leads to noticeable stepping in the results
-		Smaller lacunarity helps, but only so much without going to very small
-		
+		However, enabling it leads to noticeable stepping in the results
+		Smaller lacunarity helps, but not enough (without going to very small)
+
 		Try:
-		- Harmonic or geometric mean? (Might be equivalent to taking mean after taking inverse instead of before)
+		- Harmonic or geometric mean? (Might be equivalent to taking mean in log domain or not)
 		- Some sort of smoothmax function?
 		"""
 		MAX_SCALES = False
-		# MAX_SCALES = True
-
-		# If using MAX_SCALES, there's noticeable stepping in the results; smaller lacunarity helps
 
 		# SCALES = [100]
 		# SCALES = [1000]
 
-		# Approx lacunarity 2
-		# SCALES = [100, 200, 500, 1000, 2000]
-		SCALES = [100, 200, 500, 1000]
-
-		# Lacunarity golden ratio (1.618)
-		# Smaller lacunarity helps with stepping
-		# SCALES = [100, 162, 262, 424, 685, 1109, 1794]
-
-		# Approx lacunarity sqrt(2)
-		# SCALES = [100, 141, 200, 316, 500, 1000, 1414]
+		# Different lacunarities
+		# SCALES = [100, 200, 500, 1000]  # approx 2
+		SCALES = [100, 200, 400, 800, 1600]  # 2
+		# SCALES = [100, 162, 262, 424, 685, 1109, 1794]  # golden ratio (1.618)
+		# SCALES = [100, 141, 200, 316, 500, 1000, 1414]  # approx sqrt(2)
 
 		shadows = []
 		for scale_km in SCALES:
 			this_shadow = gaussian_blur_map(
-				# self.wind_dir_dot_gradient_1000km,
 				self.wind_dir_dot_gradient_at_scale(scale_km),
 				sigma_km=scale_km,
 				flat_map=self._properties.flat,
 				latitude_span=self._properties.latitude_span,
 			)
+			# Compensate for scale - i.e. 100 km gradient will have approx 10x range of 1000 km gradient
 			rescale(
 				this_shadow,
 				range_in=(0.0, -OROGRAPHIC_PRECIP_MAX_GRADIENT * 100 / scale_km),
-				range_out=(0.0, OROGRAPHIC_PRECIP_SCALE_TO_RAINFALL),
+				range_out=(0.0, -np.log10(OROGRAPHIC_PRECIP_SCALE_TO_RAINFALL)),
 				clip=True,
-				in_place=True,
-			)
+				in_place=True)
+			this_shadow *= latitude_orographic_fn(latitude_radians=self._properties.latitude_column_radians, sigma_km=scale_km)
 			shadows.append(this_shadow)
 
 		assert len(shadows) == len(SCALES)
@@ -212,21 +236,14 @@ class PrecipitationModel:
 			shadow = shadows[0]
 			for this_shadow in shadows[1:]:
 				shadow = np.maximum(shadow, this_shadow)
-
 		else:
 			shadow = sum(shadows) / len(shadows)
 
-		# TODO: do this in log domain in the first place
-
-		# return 1 / (1 + shadow)
-		ret_lin = 1 / (1 + shadow)
-		ret_log = np.log10(ret_lin)
-		return ret_log
+		return shadow
 
 	def clear_cache(self):
 		del self.base_precipitation_cm
 		del self.wind_dir_dot_gradient_100km
-		# del self.wind_dir_dot_gradient_1000km
 		del self.orographic_precipitation_scale_log10
 		del self.rain_shadow_scale_simple_log10
 
@@ -319,13 +336,19 @@ def main(args=None):
 		lines = test_shapes,
 	)
 
-	plt.figure()
+	fig, ax = plt.subplots(2, 1)
 	latitude_rads = np.linspace(-0.5*np.pi, 0.5*np.pi, num=361, endpoint=True)
 	base_rainfall = rescale(latitude_rainfall_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
-	plt.plot(np.degrees(latitude_rads), base_rainfall)
-	plt.title('Base rainfall by latitude (cm)')
-	plt.grid()
-	plt.xticks(np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True))
+	ticks = np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True)
+	ax[0].plot(np.degrees(latitude_rads), base_rainfall)
+	ax[0].set_title('Base rainfall by latitude (cm)')
+	ax[0].grid()
+	ax[0].set_xticks(ticks)
+	base_rainfall = latitude_orographic_fn(latitude_rads)
+	ax[1].plot(np.degrees(latitude_rads), base_rainfall)
+	ax[1].set_title('Orographic scale by latitude')
+	ax[1].grid()
+	ax[1].set_xticks(ticks)
 
 	for dataset in datasets:
 		dataset_title = dataset['title']
@@ -464,10 +487,9 @@ def main(args=None):
 		_plot(gs[0, 0], terrain.elevation_100km, title='Elevation 100km blur', cmap='inferno')
 		_plot(gs[0, 1], terrain.gradient_magnitude_100km, title='100km Gradient mag', cmap='inferno')
 
-		dot_1000km = rain_sim.wind_dir_dot_gradient_at_scale(1000)
-		dot_max = max(max_abs(rain_sim.wind_dir_dot_gradient_100km), max_abs(dot_1000km) * 10)
+		dot_max = max(max_abs(rain_sim.wind_dir_dot_gradient_100km), max_abs(rain_sim.wind_dir_dot_gradient_1000km) * 10)
 		_plot(gs[0, 2], rain_sim.wind_dir_dot_gradient_100km, title='Wind dir dot 100k grad', cmap='bwr_r', vmin=-dot_max, vmax=dot_max)
-		_plot(gs[0, 3], dot_1000km, title='Wind dir dot 1000k grad', cmap='bwr_r', vmin=-dot_max/10, vmax=dot_max/10)
+		_plot(gs[0, 3], rain_sim.wind_dir_dot_gradient_1000km, title='Wind dir dot 1000k grad', cmap='bwr_r', vmin=-dot_max/10, vmax=dot_max/10)
 
 		elevation_im = terrain.elevation_m.copy()
 
