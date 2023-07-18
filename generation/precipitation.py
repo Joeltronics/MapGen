@@ -15,73 +15,47 @@ from .topography import Terrain
 from .winds import WindModel
 
 
-DEFAULT_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
-BASE_PRECIPITATION_RANGE_CM: Final = (0.5, 200)
-
-# Max gradient in earth dataset at 100km scale is around 0.018
-OROGRAPHIC_PRECIP_MAX_GRADIENT = 0.01
-OROGRAPHIC_PRECIP_SCALE_TO_RAINFALL = 20.
-
-
-# TODO: rename rainfall -> precipitation everywhere
 # TODO: change everything to be in mm instead of cm
+DEFAULT_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
+BASE_PRECIPITATION_RANGE_CM: Final = (5., 200)
 
 
-def latitude_rainfall_fn(latitude_radians: np.ndarray) -> np.ndarray:
+# Max orographic rain is 10x the amount, max rain shadow is 1/10 the amount
+OROGRAPHIC_PRECIP_MAX_SCALE: Final = 10.
+# Max orographic rain or rain shadow is hit when dot product = 0.005
+# TODO: should probably try to soft-clip this
+# (max gradient in earth dataset at 100km scale is around 0.018)
+OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT: Final = 0.005
+
+
+def latitude_precipitation_fn(latitude_radians: np.ndarray) -> np.ndarray:
 	# Roughly based on https://commons.wikimedia.org/wiki/File:Relationship_between_latitude_vs._temperature_and_precipitation.png
 	# return (np.cos(2 * latitude_radians) * 0.5 + 0.5) * (np.cos(6 * latitude_radians) * 0.5 + 0.5)
 	return 0.5*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.5*(np.cos(6*latitude_radians) * 0.5 + 0.5)
 	# return 0.4*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.6*(np.cos(6*latitude_radians) * 0.5 + 0.5)
 
 
-def latitude_orographic_fn(latitude_radians: np.ndarray, sigma_km: float = 100.) -> np.ndarray:
-	"""
-	Less orographic & rain shadow at the equator/tropics/circle/pole, because:
-	a) Much of the rainfall behavior at these latitudes is due to edges of wind cells causing air to rise/fall, and this
-		is already accounted for by base rainfall
-	b) Rain ,odel doesn't really work at these points:
-		- It uses static wind vectors (i.e. essentially acting as if the jet stream never moves)
-		- Using dot product with blurred latitude assumes the wind was moving a roughly similar direction over the
-			entire blur scale; edges of cells are big sudden changes in direction
-	"""
-
-	sigma = (sigma_km * 1000) / EARTH_POLAR_CIRCUMFERENCE_M * TWOPI
-
-	ret = None
-	for latitude in [-90, -60, -30, 0, 30, 60, 90]:
-		mu = np.radians(latitude)
-		layer = 1.0 - gaussian(latitude_radians, mu=mu, sigma=sigma)
-		if ret is None:
-			ret = layer
-		else:
-			ret *= layer
-
-	return ret
-
-
-def _calculate_rainfall_basic(
+def _calculate_base_precipitation(
 		noise: Optional[np.ndarray],
 		latitude_deg: np.ndarray,
 		noise_strength=0.25,
 		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
-	# TODO: use rainfall model here
-
 	if noise is not None:
 		require_same_shape(noise, latitude_deg)
 
 	latitude = np.radians(latitude_deg)
-	latitude_rainfall_map = latitude_rainfall_fn(latitude)
+	latitude_precip_map = latitude_precipitation_fn(latitude)
 
 	if noise_strength > 0:
 		# TODO: should this use domain warping instead of interpolation? or combination of both?
-		rainfall_01 = noise * noise_strength + latitude_rainfall_map * (1.0 - noise_strength)
+		precip_01 = noise * noise_strength + latitude_precip_map * (1.0 - noise_strength)
 	else:
-		rainfall_01 = latitude_rainfall_map
+		precip_01 = latitude_precip_map
 
-	rainfall_cm = rescale(rainfall_01, (0.0, 1.0), precipitation_range_cm)
-	return rainfall_cm
+	precip_cm = rescale(precip_01, (0.0, 1.0), precipitation_range_cm)
+	return precip_cm
 
 
 class PrecipitationModel:
@@ -114,7 +88,7 @@ class PrecipitationModel:
 
 	@cached_property
 	def base_precipitation_cm(self):
-		return _calculate_rainfall_basic(
+		return _calculate_base_precipitation(
 			noise=self._noise,
 			latitude_deg=self._effective_latitude_deg,
 			noise_strength=self._noise_strength,
@@ -124,12 +98,16 @@ class PrecipitationModel:
 	@cached_property
 	def wind_dir_dot_gradient_100km(self):
 		wind_x, wind_y = self._wind.direction
+		wind_x = gaussian_blur_map(wind_x, sigma_km=100, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
+		wind_y = gaussian_blur_map(wind_y, sigma_km=100, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
 		gradient_x, gradient_y = self._terrain.gradient_100km
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
 	@cached_property
 	def wind_dir_dot_gradient_1000km(self):
 		wind_x, wind_y = self._wind.direction
+		wind_x = gaussian_blur_map(wind_x, sigma_km=1000, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
+		wind_y = gaussian_blur_map(wind_y, sigma_km=1000, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
 		gradient_x, gradient_y = self._terrain.gradient_1000km
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
@@ -141,36 +119,23 @@ class PrecipitationModel:
 			return self.wind_dir_dot_gradient_1000km
 
 		wind_x, wind_y = self._wind.direction
+		wind_x = gaussian_blur_map(wind_x, sigma_km=scale_km, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
+		wind_y = gaussian_blur_map(wind_y, sigma_km=scale_km, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
 		gradient_x, gradient_y = self._terrain.gradient_at_scale(scale_km=scale_km)
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
 	@cached_property
 	def orographic_precipitation_scale_log10(self):
 		"""
-		Orographic rainfall (where wind is going uphill)
+		Orographic precipitation (where wind is going uphill)
 		"""
-
 		# TODO: May even want smaller scale than this? 10km?
-
-		# Even though terrain gradient is already blurred, wind isn't and has weird convergence/divergence behavior
-		# that can lead to sudden changes in dot product
-		# TODO: should blur be after rescale?
-		rain = gaussian_blur_map(
+		return rescale(
 			self.wind_dir_dot_gradient_100km,
-			sigma_km=100,
-			flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-
-		rescale(
-			rain,
-			range_in=(0.0, OROGRAPHIC_PRECIP_MAX_GRADIENT),
-			range_out=(0.0, np.log10(OROGRAPHIC_PRECIP_SCALE_TO_RAINFALL)),
+			range_in=(0.0, OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT),
+			range_out=(0.0, np.log10(OROGRAPHIC_PRECIP_MAX_SCALE)),
 			clip=True,
-			in_place=True,
 		)
-
-		rain *= latitude_orographic_fn(latitude_radians=self._properties.latitude_column_radians, sigma_km=100)
-
-		return rain
 
 	@cached_property
 	def rain_shadow_scale_simple_log10(self):
@@ -211,20 +176,13 @@ class PrecipitationModel:
 
 		shadows = []
 		for scale_km in SCALES:
-			this_shadow = gaussian_blur_map(
-				self.wind_dir_dot_gradient_at_scale(scale_km),
-				sigma_km=scale_km,
-				flat_map=self._properties.flat,
-				latitude_span=self._properties.latitude_span,
-			)
 			# Compensate for scale - i.e. 100 km gradient will have approx 10x range of 1000 km gradient
-			rescale(
-				this_shadow,
-				range_in=(0.0, -OROGRAPHIC_PRECIP_MAX_GRADIENT * 100 / scale_km),
-				range_out=(0.0, -np.log10(OROGRAPHIC_PRECIP_SCALE_TO_RAINFALL)),
+			this_shadow = rescale(
+				self.wind_dir_dot_gradient_at_scale(scale_km),
+				range_in=(0.0, -OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT * 100 / scale_km),
+				range_out=(0.0, -np.log10(OROGRAPHIC_PRECIP_MAX_SCALE)),
 				clip=True,
-				in_place=True)
-			this_shadow *= latitude_orographic_fn(latitude_radians=self._properties.latitude_column_radians, sigma_km=scale_km)
+			)
 			shadows.append(this_shadow)
 
 		assert len(shadows) == len(SCALES)
@@ -242,8 +200,9 @@ class PrecipitationModel:
 		return shadow
 
 	def clear_cache(self):
-		del self.base_precipitation_cm
+		# Keep base_precipitation_cm
 		del self.wind_dir_dot_gradient_100km
+		# del self.wind_dir_dot_gradient_1000km  # gives AttributeError for some reason? (TODO: figure out why)
 		del self.orographic_precipitation_scale_log10
 		del self.rain_shadow_scale_simple_log10
 
@@ -272,26 +231,6 @@ class PrecipitationModel:
 			self.clear_cache()
 
 		return self._precipitation_cm
-
-
-def calculate_rainfall(
-		noise: np.ndarray,
-		latitude_deg: np.ndarray,
-		noise_strength=0.25,
-		) -> np.ndarray:
-	"""
-	DEPRECATED
-	"""
-
-	# TODO: Remove this
-
-	return _calculate_rainfall_basic(
-		noise=noise,
-		latitude_deg=latitude_deg,
-		noise_strength=noise_strength,
-		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
-	)
-
 
 
 def main(args=None):
@@ -336,19 +275,14 @@ def main(args=None):
 		lines = test_shapes,
 	)
 
-	fig, ax = plt.subplots(2, 1)
+	fig, ax = plt.subplots(1, 1)
 	latitude_rads = np.linspace(-0.5*np.pi, 0.5*np.pi, num=361, endpoint=True)
-	base_rainfall = rescale(latitude_rainfall_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
+	base_precip = rescale(latitude_precipitation_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
 	ticks = np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True)
-	ax[0].plot(np.degrees(latitude_rads), base_rainfall)
-	ax[0].set_title('Base rainfall by latitude (cm)')
-	ax[0].grid()
-	ax[0].set_xticks(ticks)
-	base_rainfall = latitude_orographic_fn(latitude_rads)
-	ax[1].plot(np.degrees(latitude_rads), base_rainfall)
-	ax[1].set_title('Orographic scale by latitude')
-	ax[1].grid()
-	ax[1].set_xticks(ticks)
+	ax.plot(np.degrees(latitude_rads), base_precip)
+	ax.set_title('Base precipitation by latitude (cm)')
+	ax.grid()
+	ax.set_xticks(ticks)
 
 	for dataset in datasets:
 		dataset_title = dataset['title']

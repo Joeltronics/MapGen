@@ -715,7 +715,7 @@ def sphere_gradient(
 	"""
 
 	height, width = im.shape
-	if width != 2 * height:
+	if height != width // 2:
 		raise ValueError(f'sphere_gradient() image must have aspect ratio 2 ({im.shape=})')
 
 	if auto_scale:
