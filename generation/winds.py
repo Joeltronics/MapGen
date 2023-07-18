@@ -40,6 +40,7 @@ IMPEDANCE_CMAP = plt.get_cmap('RdYlBu')
 DIV_CMAP = plt.get_cmap('bwr')
 
 
+# Direction is Cartesian angle, not screen-space (i.e. N = 90 = +Y)
 # Direction is based on linear interpolation, so wrapping around won't work
 BASE_WIND_STRENGTH_DIR_BY_LATITUDE: Final = [
 	# Polar cells
@@ -59,8 +60,9 @@ BASE_WIND_STRENGTH_DIR_BY_LATITUDE: Final = [
 
 	# Hadley cells
 	(29.0,  6.5, -90),  # S
-	(15.0,   8.0, -135),  # SW
-	(-0.001, 4.5, -180),  # W
+	# (15.0,   8.0, -135),  # SW
+	# (-0.001, 4.5, -180),  # W
+	(-0.001, 4.5, -135),  # W
 ]
 
 _wind_strength_interpolator = scipy.interpolate.interp1d(
@@ -79,11 +81,12 @@ REDUCE_WIND_SPEED_ON_LAND: Final = 4.0
 MAX_GRADIENT_DIRECTION_SHIFT: Final = 0.75
 MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL: Final = 0.5
 HILL_MAP_LAND_SCALE: Final = 2.0
-HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
+# HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
+HILL_MAP_ELEVATION_SCALE: Final = 0.  # TEMPORARY: set to 0 while working on orographic rainfall
 HILL_MAP_GRADIENT_SCALE: Final = 1e6
 
 
-class WindSimulation:
+class WindModel:
 	def __init__(
 			self,
 			map_properties: MapProperties,
@@ -102,15 +105,50 @@ class WindSimulation:
 
 		self._dtype = terrain.terrain_m.dtype
 
+		# Cached properties that are not @cached_property
 		self._base_magnitude_mps = None
 		self._base_dir_unit_x = None
 		self._base_dir_unit_y = None
-
 		self._magnitude_mps = None
 		self._dir_unit_x = None
 		self._dir_unit_y = None
 
-	# Computed properties
+		# Main output
+		self._prevailing_wind_x = None
+		self._prevailing_wind_y = None
+
+	# Main output
+
+	# TODO: rename these to be more consistent
+
+	@property
+	def prevailing_wind_mps(self) -> tuple[np.ndarray, np.ndarray]:
+		"""
+		:returns: (wind X, wind Y) in meters per second
+		"""
+		if (self._prevailing_wind_x is None) or (self._prevailing_wind_y is None):
+			self.process()
+		assert (self._prevailing_wind_x is not None) and (self._prevailing_wind_y is not None)
+		return self._prevailing_wind_x, self._prevailing_wind_y
+
+	@property
+	def magnitude_mps(self) -> np.ndarray:
+		if self._magnitude_mps is None:
+			self.process()
+		assert self._magnitude_mps is not None
+		return self._magnitude_mps
+
+	@property
+	def direction(self) -> tuple[np.ndarray, np.ndarray]:
+		"""
+		:returns (unit vector x, unit vector y)
+		"""
+		if (self._prevailing_wind_x is None) or (self._prevailing_wind_y is None):
+			self.process()
+		assert (self._dir_unit_x is not None) and (self._dir_unit_y is not None)
+		return self._dir_unit_x, self._dir_unit_y
+
+	# Other computed properties
 
 	@property
 	def base_magnitude_mps(self) -> np.ndarray:
@@ -198,13 +236,13 @@ class WindSimulation:
 		assert self._dir_unit_x is not None
 		assert self._dir_unit_y is not None
 
-		ret_x = self._magnitude_mps * self._dir_unit_x
-		ret_y = self._magnitude_mps * self._dir_unit_y
+		self._prevailing_wind_x = self._magnitude_mps * self._dir_unit_x
+		self._prevailing_wind_y = self._magnitude_mps * self._dir_unit_y
 
 		if not keep_cache:
 			self.clear_cache()
 
-		return ret_x, ret_y
+		return self._prevailing_wind_x, self._prevailing_wind_y
 
 	def _make_base_winds(self):
 
@@ -453,18 +491,26 @@ def main(args=None):
 	parser = argparse.ArgumentParser()
 	mx = parser.add_mutually_exclusive_group()
 	mx.add_argument('--circle', dest='circle_only', action='store_true', help='Only run circle test')
+	mx.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
 	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
 	args = parser.parse_args(args)
 
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
+	standard_res_earth = not (args.circle_only or args.fullres)
+	lower_res_earth = args.multires
+	earth_regions = standard_res_earth
+	circle = args.circle_only or not args.fullres
+
 	datasets = get_test_datasets(
-		full_res_earth = args.fullres,
-		lower_res_earch = not args.circle_only,
-		earth_flat = not args.circle_only,
-		north_america = not args.circle_only,
-		circle = True,
+		earth_3600 = args.fullres,
+		earth_1024 = standard_res_earth,
+		earth_256 = lower_res_earth,
+		earth_1024_flat = lower_res_earth,
+		north_america = earth_regions,
+		south_america = earth_regions,
+		circle = circle,
 	)
 
 	for dataset in datasets:
@@ -503,12 +549,11 @@ def main(args=None):
 
 		tprint('Calculating wind')
 
-		sim = WindSimulation(map_properties=map_properties, terrain=terrain)
+		sim = WindModel(map_properties=map_properties, terrain=terrain)
 		wind_x, wind_y = sim.process(keep_cache=True)
 
-		wind_mag = magnitude(wind_x, wind_y)
-		wind_x_norm = wind_x / wind_mag
-		wind_y_norm = wind_y / wind_mag
+		wind_mag = sim.magnitude_mps
+		wind_x_norm, wind_y_norm = sim.direction
 
 		tprint('Calculating divergence')
 
@@ -595,13 +640,10 @@ def main(args=None):
 			if grid:
 				ax.grid()
 
-			if add_range_to_title:
-				if title:
-					title += ' '
-				dr = data_range(data)
-				title += f'[{dr[0]:.2g}, {dr[1]:.2g}]'
-
 			if title:
+				if add_range_to_title:
+					dr = data_range(data)
+					title += f' [{dr[0]:.2g}, {dr[1]:.2g}]'
 				ax.set_title(title)
 
 			return ax
@@ -622,13 +664,13 @@ def main(args=None):
 		wind_elevation_im = terrain.elevation_m.copy()
 		wind_elevation_im[topography_m < 0] = -1000.
 
-		# TODO: is it possible to overlay this with elevation, without it looking messy?
-		# ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
-		ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind magnitude')
+		# ax_wind = _plot(gs[1:3, 0:2], wind_mag, vmin=1.0, vmax=12.0, cmap='viridis', title='Wind')
+		# _plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False)
 
-		_plot(ax_wind, wind_elevation_im, cmap='gray', alpha=0.25, colorbar=False, add_range_to_title=False)
+		ax_wind = _plot(gs[1:3, 0:2], wind_elevation_im, cmap='gray', colorbar=False)
+		_plot(ax_wind, wind_mag, vmin=1.0, vmax=12.0, alpha=0.75, cmap='viridis', title='Wind')
 
-		# TODO: make this less ugly
+		# TODO: make the arrows less ugly
 		ax_wind.quiver(
 			arrow_locs_x, arrow_locs_y, base_dir_arrows_x, base_dir_arrows_y,
 			color='red', alpha=0.75, **quiver_kwargs)

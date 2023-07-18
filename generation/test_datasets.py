@@ -10,9 +10,20 @@ from utils.utils import tprint
 
 CIRCLE_MAG: Final = 6000
 
+AFRICA_LAT_RANGE = (-40, 40)
+AFRICA_LON_RANGE = (-30, 60)
 
 NA_LAT_RANGE = (10, 65)
 NA_LON_RANGE = (-135, -45)
+
+SA_LAT_RANGE = (-60, 20)
+SA_LON_RANGE = (-90, -30)
+
+HIMALAYA_LAT_RANGE = (0, 45)
+HIMALAYA_LON_RANGE = (60, 110)
+
+PNW_LAT_RANGE = (40, 55)
+PNW_LON_RANGE = (-135, -115)
 
 
 def _get_region(
@@ -35,31 +46,44 @@ def _get_region(
 	)
 
 	topography_m = full_topography_m[
-		y_range[0] : 1 + y_range[1],
-		x_range[0] : 1 + x_range[1]
+		y_range[0] : y_range[1],
+		x_range[0] : x_range[1]
 	]
 
 	assert len(topography_m.shape) == 2 and topography_m.shape[0] > 0 and topography_m.shape[1] > 0, f"{topography_m.shape=}"
 
-	return topography_m
+	return topography_m.copy()
 
 
 def get_test_datasets(
 		*,
-		full_res_earth = False,
-		lower_res_earch = False,
-		earth_flat = False,
+		earth_21600 = False,  # Note: dataset does not have Bathymetry
+		earth_3600 = False,
+		earth_1024 = False,
+		earth_256 = False,
+		earth_1024_flat = False,
+		africa = False,
 		north_america = False,
+		south_america = False,
+		himalaya = False,
+		pacific_northwest = False,
 		circle = False,
+		lines = False,
 		) -> list[dict]:
 
-	any_earth = any([full_res_earth, lower_res_earch, earth_flat, north_america])
+	any_earth = any([earth_3600, earth_1024, earth_256, earth_1024_flat, africa, north_america, south_america])
+	any_high_res_earth = any([earth_21600, pacific_northwest])
 
 	earth_topography_m = None
-	if any_earth:
+	earth_topography_highres_m = None
+	if any_earth or any_high_res_earth:
 		tprint('Loading Earth data...')
 		from data import data
-		earth_topography_m = data.get_topography()
+		if any_earth:
+			earth_topography_m = data.get_topography()
+		if any_high_res_earth:
+			earth_topography_highres_m = data.get_elevation(high_res=True, ocean_nan=True)
+			earth_topography_highres_m = np.nan_to_num(earth_topography_highres_m, nan=-1.)
 
 	x = np.linspace(-4.0, 4.0, 512)
 	y = np.linspace(-4.0, 4.0, 512)
@@ -69,63 +93,108 @@ def get_test_datasets(
 	circle_data[r <= 1.0] = CIRCLE_MAG
 	circle_data_latitude_range = (30, 60)
 
+	# Pixels span 15 degrees latitude, which is approx 1,665 km
+	# Each pixel is 1665 / 512 = 3.25 km
+	# 100 km = 30.8 pixels
+	# +/- 45 pixels = about 300 km apart
+	lines_data_latitude_range = (30, 45)
+	half_thickness = 5
+	lines_data = np.full((512, 512), 0.0, dtype=np.float32)
+	lines_data[256 + 45 - half_thickness : 256 + 45 + half_thickness, :] = 1000
+	lines_data[256 - 45 - half_thickness : 256 - 45 + half_thickness, 256:] = 1000
+
 	datasets = []
 
-	if full_res_earth:
-		datasets += [
-			dict(
-				title=f'Earth, {earth_topography_m.shape[1]}x{earth_topography_m.shape[0]}',
-				source_data=earth_topography_m,
-				flat_map=False,
-				high_res_arrows=True,
-			)
-		]
+	def add(title: str, source_data, flat_map=False, high_res_arrows=False, **kwargs):
 
-	if lower_res_earch:
-		datasets += [
-			dict(
-				title='Earth, 1024x512',
-				source_data=earth_topography_m,
-				resolution=(512, 1024),
-				flat_map=False,
-			),
-			dict(
-				title='Earth, 256x128',
-				source_data=earth_topography_m,
-				resolution=(128, 256),
-				flat_map=False,
-			),
-		]
+		if (resolution := kwargs.get('resolution', None)):
+			title += f', {resolution[1]}x{resolution[0]}'
+		else:
+			title += f', {source_data.shape[1]}x{source_data.shape[0]}'
+		if flat_map:
+			title += ', flat model'
+		datasets.append(dict(title=title, source_data=source_data, flat_map=flat_map, high_res_arrows=high_res_arrows, **kwargs))
 
-	if earth_flat:
-		datasets += [
-			dict(
-				title='Earth, 1024x512, flat',
-				source_data=earth_topography_m,
-				resolution=(512, 1024),
-				flat_map=True,
-			),
-		]
+	if earth_21600:
+		add('Earth', earth_topography_highres_m,
+			flat_map=False,
+			high_res_arrows=True,
+		)
+
+	if earth_3600:
+		add('Earth', earth_topography_m,
+			flat_map=False,
+			high_res_arrows=True,
+		)
+
+	if earth_1024:
+		add('Earth', earth_topography_m,
+			resolution=(512, 1024),
+			flat_map=False,
+		)
+
+	if earth_256:
+		add('Earth', earth_topography_m,
+			resolution=(128, 256),
+			flat_map=False,
+		)
+
+	if earth_1024_flat:
+		add('Earth', earth_topography_m,
+			resolution=(512, 1024),
+			flat_map=True,
+		)
+
+	if africa:
+		add('Africa',
+			_get_region(earth_topography_m, lat_range=AFRICA_LAT_RANGE, lon_range=AFRICA_LON_RANGE),
+			latitude_range=AFRICA_LAT_RANGE,
+			longitude_range=AFRICA_LON_RANGE,
+			flat_map=True,
+		)
 
 	if north_america:
-		datasets += [
-			dict(
-				title='North America (flat)',
-				source_data=_get_region(earth_topography_m, lat_range=NA_LAT_RANGE, lon_range=NA_LON_RANGE),
-				latitude_range=NA_LAT_RANGE,
-				longitude_range=NA_LON_RANGE,
-				flat_map=True,
-			),
-		]
+		add('North America',
+			_get_region(earth_topography_m, lat_range=NA_LAT_RANGE, lon_range=NA_LON_RANGE),
+			latitude_range=NA_LAT_RANGE,
+			longitude_range=NA_LON_RANGE,
+			flat_map=True,
+		)
+
+	if south_america:
+		add('South America',
+			_get_region(earth_topography_m, lat_range=SA_LAT_RANGE, lon_range=SA_LON_RANGE),
+			latitude_range=SA_LAT_RANGE,
+			longitude_range=SA_LON_RANGE,
+			flat_map=True,
+		)
+
+	if himalaya:
+		add('Himalayas',
+			_get_region(earth_topography_highres_m, lat_range=HIMALAYA_LAT_RANGE, lon_range=HIMALAYA_LON_RANGE),
+			latitude_range=HIMALAYA_LAT_RANGE,
+			longitude_range=HIMALAYA_LON_RANGE,
+			flat_map=True,
+		)
+
+	if pacific_northwest:
+		add('Pacific Northwest',
+			_get_region(earth_topography_highres_m, lat_range=PNW_LAT_RANGE, lon_range=PNW_LON_RANGE),
+			latitude_range=PNW_LAT_RANGE,
+			longitude_range=PNW_LON_RANGE,
+			flat_map=True,
+		)
 
 	if circle:
-		datasets += [
-			dict(
-				title='Circle test',
-				source_data=circle_data,
-				latitude_range=circle_data_latitude_range,
-				flat_map=True,
-			),
-		]
+		add('Circle test', circle_data,
+			latitude_range=circle_data_latitude_range,
+			flat_map=True,
+		)
+
+	if lines:
+		add('Lines test', lines_data,
+			latitude_range=lines_data_latitude_range,
+			flat_map=True,
+		)
 
 	return datasets

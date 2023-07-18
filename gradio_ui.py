@@ -107,7 +107,10 @@ def gradio_callback_map_generator(
 			return []
 		return [val for val in items if val is not None]
 
-	climate_imgs = [planet.temperature_img, planet.rainfall_img] + planet.prevailing_wind_imgs + [planet.climate_effective_latitude_img]
+	climate_imgs = \
+		[planet.temperature_img, planet.precipitation_img, planet.rel_precipitation_img] + \
+		planet.prevailing_wind_imgs + \
+		[planet.climate_effective_latitude_img]
 
 	return (
 		print_str,

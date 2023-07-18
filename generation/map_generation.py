@@ -15,10 +15,10 @@ from PIL import Image
 from .coloring import to_image, biome_map, BIOME_GRID
 from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
 from .map_properties import MapProperties
-from .rainfall import calculate_rainfall, latitude_rainfall_fn, DEFAULT_PRECIPITATION_RANGE_CM
+from .precipitation import PrecipitationModel, latitude_precipitation_fn
 from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
 from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
-from .winds import WindSimulation, make_prevailing_wind_imgs
+from .winds import WindModel, make_prevailing_wind_imgs
 
 from utils.image import float_to_uint8, remap, matplotlib_figure_canvas_to_image, map_gradient
 from utils.map_projection import make_projection_map
@@ -29,7 +29,6 @@ from utils.utils import tprint, md5_hash
 """
 TODO:
 - tectonic continents
-- rainfall based on wind
 """
 
 
@@ -85,7 +84,8 @@ ELEVATION_CMAP = plt.get_cmap('seismic')
 EROSION_CMAP = plt.get_cmap('inferno')
 EFFECTIVE_LATITUDE_CMAP = plt.get_cmap('plasma')
 TEMPERATURE_CMAP = plt.get_cmap('coolwarm')
-RAINFALL_CMAP = plt.get_cmap('YlGn')
+PRECIPITATION_CMAP = plt.get_cmap('YlGn')
+REL_PRECIPITATION_CMAP = plt.get_cmap('bwr_r')
 
 
 def make_polar_azimuthal(equirectangular_texture: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -209,8 +209,9 @@ class Planet:
 	prevailing_wind_data: Optional[tuple[np.ndarray, np.ndarray]] = None
 	prevailing_wind_imgs: Optional[list[np.ndarray]] = None
 
-	rainfall_cm: Optional[np.ndarray] = None
-	rainfall_img: Optional[np.ndarray] = None
+	precipitation_cm: Optional[np.ndarray] = None
+	precipitation_img: Optional[np.ndarray] = None
+	rel_precipitation_img: Optional[np.ndarray] = None
 
 	water_data: Optional[np.ndarray] = None
 	land_water_img: Optional[np.ndarray] = None
@@ -227,15 +228,16 @@ class Planet:
 			climate_effective_latitude_deg: np.ndarray,
 			temperature_C: np.ndarray,
 			prevailing_wind_mps: np.ndarray,
-			rainfall_cm: np.ndarray,
+			precipitation_cm: np.ndarray,
 			flat_map: bool,
+			base_precipitation_cm: Optional[np.ndarray] = None,
 			graph_figure=None,
 			) -> 'Planet':
 
 		topography_m = terrain.terrain_m
 
-		if not (topography_m.shape == temperature_C.shape == rainfall_cm.shape):
-			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {rainfall_cm.shape}')
+		if not (topography_m.shape == temperature_C.shape == precipitation_cm.shape):
+			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_cm.shape}')
 
 		height, width = topography_m.shape
 
@@ -247,7 +249,7 @@ class Planet:
 		max_abs_elevation = max_abs(topography_m)
 		elevation_11 = rescale(topography_m, range_in=(-max_abs_elevation, max_abs_elevation), range_out=(-1., 1.))
 		temperature_01 = rescale(temperature_C)
-		rainfall_01 = rescale(rainfall_cm)
+		precipitation_01 = rescale(precipitation_cm)
 
 		tprint('Calculating gradient')
 		gradient_x, gradient_y = map_gradient(elevation_above_sea_m, flat_map=flat_map, latitude_span=map_properties.latitude_span)
@@ -259,7 +261,7 @@ class Planet:
 		gradient_img_bw, gradient_img_color = make_gradient_imgs(gradient_x=gradient_x, gradient_y=gradient_y, gradient_mag=gradient_mag)
 
 		tprint('Making image')
-		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, rainfall_cm=rainfall_cm)
+		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, precipitation_cm=precipitation_cm)
 
 		tprint('Making other data views')
 
@@ -269,8 +271,14 @@ class Planet:
 
 		elevation_img = ELEVATION_CMAP(elevation_11 * 0.5 + 0.5)
 		temperature_img = TEMPERATURE_CMAP(temperature_01)
-		rainfall_img = RAINFALL_CMAP(rainfall_01)
+		precipitation_img = PRECIPITATION_CMAP(precipitation_01)
 		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=map_properties.latitude_range)
+
+		rel_precipitation_img = None
+		if base_precipitation_cm is not None:
+			rel_precipitation = np.log10(precipitation_cm / base_precipitation_cm)
+			rescale(rel_precipitation, range_in=(-1., 1.), range_out=(0., 1.), in_place=True)
+			rel_precipitation_img = REL_PRECIPITATION_CMAP(rel_precipitation)
 
 		erosion_img = EROSION_CMAP(rescale(-terrain.erosion)) if (terrain.erosion is not None) else None
 
@@ -278,7 +286,7 @@ class Planet:
 		land_water_img[land_mask, :] = LAND
 		land_water_img[water_mask, :] = WATER
 
-		biomes_img = biome_map(elevation_11=elevation_11, temperature_C=temperature_C, rainfall_cm=rainfall_cm)
+		biomes_img = biome_map(elevation_11=elevation_11, temperature_C=temperature_C, precipitation_cm=precipitation_cm)
 
 		if not flat_map:
 			tprint('Making map projections')
@@ -306,8 +314,9 @@ class Planet:
 			temperature_img=temperature_img,
 			prevailing_wind_data=prevailing_wind_mps,
 			prevailing_wind_imgs=prevailing_wind_imgs,
-			rainfall_cm=rainfall_cm,
-			rainfall_img=rainfall_img,
+			precipitation_cm=precipitation_cm,
+			precipitation_img=precipitation_img,
+			rel_precipitation_img=rel_precipitation_img,
 			water_data=water_mask,
 			land_water_img=land_water_img,
 			biomes_img=biomes_img,
@@ -317,7 +326,7 @@ class Planet:
 
 def debug_graph(water_amount):
 
-	# TODO: actual histograms of temp & rainfall by latitude
+	# TODO: actual histograms of temp & precipitation by latitude
 	# also histograms of elevation & gradient
 
 	# fig = Figure()
@@ -328,7 +337,7 @@ def debug_graph(water_amount):
 	latitude_rad = np.radians(latitude)
 
 	latitude_temp = np.cos(2 * latitude_rad) * 0.5 + 0.5
-	latitude_rainfall_map = latitude_rainfall_fn(latitude_rad)
+	latitude_precipitation_map = latitude_precipitation_fn(latitude_rad)
 
 	elevation_in = np.linspace(-1, 1, num=256)
 	elevation_out = scale_topography_for_water_level(elevation_in, water_amount=water_amount)
@@ -342,7 +351,7 @@ def debug_graph(water_amount):
 	biome_im = BIOME_GRID
 
 	ax = axes[0][0]
-	ax.plot(latitude, latitude_rainfall_map, label='Rainfall')
+	ax.plot(latitude, latitude_precipitation_map, label='precipitation')
 	ax.plot(latitude, latitude_temp, label='Temperature')
 	ax.set_xlabel('Latitude (degrees)')
 	ax.grid()
@@ -358,7 +367,7 @@ def debug_graph(water_amount):
 	ax = axes[1][1]
 	ax.imshow(biome_im, origin='lower', extent=(0.0, 1.0, 0.0, 1.0))  # extent=(left, right, bottom, top)
 	ax.set_xlabel('Temperature')
-	ax.set_ylabel('Rainfall')
+	ax.set_ylabel('precipitation')
 	# ax.grid()
 
 	return matplotlib_figure_canvas_to_image(figure=fig, canvas=canvas)
@@ -425,7 +434,7 @@ def _generate(
 
 	# Override noise_strength here, because it's used later in calculate_temperature
 	temperature_noise = _fbm('temperature', noise_strength=(1.0 if noise_strength > 0 else 0.0)) * 0.5 + 0.5
-	rainfall_noise = _fbm('rainfall') * 0.5 + 0.5
+	precipitation_noise = _fbm('precipitation') * 0.5 + 0.5
 
 	ocean_turbulence_noise = _fbm('turbulence', base_frequency=4, gain=0.75)
 
@@ -469,22 +478,24 @@ def _generate(
 		assert -90. <= np.amin(climate_effective_latitude_deg) and np.amax(climate_effective_latitude_deg) <= 90.		
 
 	"""
-	TODO: Rainfall should affect erosion
-	i.e. calculate topography -> wind -> rainfall -> erosion -> re-calculate topography
+	TODO: precipitation should affect erosion
+	i.e. calculate topography -> wind -> precipitation -> erosion -> re-calculate topography
 
 	2 iterations is probably plenty:
 	- Initial elevation estimates without erosion
-	- Calculate wind & rainfall from this elevation
-	- Apply erosion, scaled by rainfall
-	- Recalculate wind & rainfall with new eroded elevation
+	- Calculate wind & precipitation from this elevation
+	- Apply erosion, scaled by precipitation
+	- Recalculate wind & precipitation with new eroded elevation
 	"""
-	# TODO: pass in some noise for domain warping, and use this same noise for wind/temperature/rainfall
+	# TODO: pass in some noise for domain warping, and use this same noise for wind/temperature/precipitation
 	tprint('Calculating wind')
-	prevailing_wind_mps = WindSimulation(
+	wind_model = WindModel(
 		map_properties=map_properties,
 		terrain=terrain,
 		effective_latitude_deg=climate_effective_latitude_deg,
-	).process()
+	)
+	wind_model.process()
+	prevailing_wind_mps = wind_model.prevailing_wind_mps
 
 	tprint('Calculating temperature')
 	temperature_C = calculate_temperature(
@@ -496,8 +507,16 @@ def _generate(
 		noise_strength=(0.75*noise_strength),
 	)
 
-	tprint('Calculating Rainfall')
-	rainfall_cm = calculate_rainfall(rainfall_noise, effective_latitude_deg=climate_effective_latitude_deg)
+	tprint('Calculating precipitation')
+	precipitation_model = PrecipitationModel(
+		map_properties=map_properties,
+		terrain=terrain,
+		wind=wind_model,
+		effective_latitude_deg=climate_effective_latitude_deg,
+		noise=precipitation_noise,
+	)
+	precipitation_cm = precipitation_model.process()
+	base_precipitation_cm = precipitation_model.base_precipitation_cm
 
 	tprint('Generating graphs')
 	graph_figure = debug_graph(water_amount=water_amount)
@@ -509,7 +528,8 @@ def _generate(
 		climate_effective_latitude_deg=climate_effective_latitude_deg,
 		temperature_C=temperature_C,
 		prevailing_wind_mps=prevailing_wind_mps,
-		rainfall_cm=rainfall_cm,
+		precipitation_cm=precipitation_cm,
+		base_precipitation_cm=base_precipitation_cm,
 		graph_figure=graph_figure,
 		flat_map=flat_map,
 	)

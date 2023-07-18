@@ -19,7 +19,9 @@ The current general algorithm is:
 	- Based on more noise (valley noise), not a realistic model
 3. Calculate gradient from elevation
 4. Generate temperature map, based on latitude + elevation + noise
-5. Generate precipitation map, based on latitude + noise
+5. Generate precipitation map
+	- Base amount is based on latitude + noise
+	- Scale for orographic precipitation & shadows based on where wind is going uphill or downhill
 6. Determine color:
 	- Ocean base color from temperature & depth
 	- Land base color from temperature & precipitation
@@ -37,9 +39,15 @@ Also improve noise-based options:
 * Improve existing options to be more realistic (exponentially distributed)
 * More realistic continental shelf simulation
 
+**Simulate by season**
+
+* It currently only simulates weather once, but it would be more accurate to run simulations throughout the year, and average them to get total year-round results (as well as then having the year-round results available)
+* Could run monthly, but this is probably overkill - even just running simulations for 3 seasons (using the same sim for spring & fall) would be a big improvement
+
 **More advanced simulation**
 
-* Simulate prevailing winds, and their effect on precipitation (orographic precipitation & rain shadows)
+* Current orographic precipitation & shadow model is a rough approximation, which is relatively fast to compute compared to a proper iterative model, but not as realistic
+* Wind model is very basic (almost entirely just based on latitude), which leads to flawed precipitation model results as well
 * Add rivers, and more realistic erosion simulation
 
 ## Real data processing
