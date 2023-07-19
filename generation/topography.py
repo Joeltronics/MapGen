@@ -2,7 +2,7 @@
 
 from functools import cached_property
 from math import isclose
-from typing import Final, Optional
+from typing import Final, Literal, Optional
 
 import numpy as np
 
@@ -101,7 +101,12 @@ class Terrain:
 
 	# Calculation methods
 
-	def gradient_at_scale(self, scale_km, _allow_cached_properties=True) -> tuple[np.ndarray, np.ndarray]:
+	def gradient_at_scale(
+			self,
+			scale_km,
+			resize: Literal[False, 'internal', True] = 'internal',
+			_allow_cached_properties=True,
+			) -> tuple[np.ndarray, np.ndarray]:
 
 		# _allow_cached_properties to prevent recursion loop
 		# TODO: instead of needing _allow_cached_properties argument, check if property is already cached
@@ -117,6 +122,7 @@ class Terrain:
 			flat_map=self._map_properties.flat,
 			latitude_span=self._map_properties.latitude_span,
 			magnitude=False,
+			resize=resize,
 		)
 
 	def gradient_magnitude_at_scale(self, scale_km, _allow_cached_properties=True) -> np.ndarray:

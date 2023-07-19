@@ -7,15 +7,17 @@ from matplotlib import pyplot as plt
 import numpy as np
 from PIL import Image
 
-from .precipitation import DEFAULT_PRECIPITATION_RANGE_CM
-from .temperature import DEFAULT_TEMPERATURE_RANGE_C
-
 from utils.image import linear_to_gamma, gamma_to_linear, float_to_uint8
 from utils.numeric import rescale, max_abs
 
 
 SEAWATER_FREEZING_POINT_C: Final = -1.8
 
+COLORMAP_TEMPERATURE_RANGE_C: Final = (0., 30.)
+BIOME_MAP_TEMPERATURE_RANGE_C: Final = (-10., 30.)
+
+COLORMAP_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
+BIOME_MAP_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
 
 COLORMAP_RESOLUTION: Final = 256
 COLORMAP_FILENAME: Final = Path('generation') / 'colormap.png'
@@ -108,8 +110,8 @@ def to_image(
 	# TODO: take elevation into account (besides just ocean)
 
 	assert COLORMAP.shape == (COLORMAP_RESOLUTION, COLORMAP_RESOLUTION, 3)
-	colormap_temperature_idx = rescale(temperature_C, (0., 30.), (0., COLORMAP_RESOLUTION-1.), clip=True)
-	colormap_rainfall_idx = rescale(precipitation_cm, DEFAULT_PRECIPITATION_RANGE_CM, (0., COLORMAP_RESOLUTION-1.), clip=True)
+	colormap_temperature_idx = rescale(temperature_C, COLORMAP_TEMPERATURE_RANGE_C, (0., COLORMAP_RESOLUTION-1.), clip=True)
+	colormap_rainfall_idx = rescale(precipitation_cm, COLORMAP_PRECIPITATION_RANGE_CM, (0., COLORMAP_RESOLUTION-1.), clip=True)
 	colormap_temperature_idx = np.floor(colormap_temperature_idx).astype(int)
 	colormap_rainfall_idx = np.floor(colormap_rainfall_idx).astype(int)
 
@@ -140,8 +142,8 @@ def biome_map(elevation_11: np.ndarray, temperature_C: np.ndarray, precipitation
 	if not (elevation_11.shape == temperature_C.shape == precipitation_cm.shape):
 		raise ValueError(f'Arrays do not have the same shape: {elevation_11.shape}, {temperature_C.shape}, {precipitation_cm.shape}')
 
-	temperature_01 = rescale(temperature_C, DEFAULT_TEMPERATURE_RANGE_C, (0., 1.), clip=True)
-	rainfall_01 = rescale(precipitation_cm, DEFAULT_PRECIPITATION_RANGE_CM, (0., 1.0), clip=True)
+	temperature_01 = rescale(temperature_C, BIOME_MAP_TEMPERATURE_RANGE_C, (0., 1.), clip=True)
+	rainfall_01 = rescale(precipitation_cm, BIOME_MAP_PRECIPITATION_RANGE_CM, (0., 1.0), clip=True)
 
 	rainfall_quadrant = np.clip(np.floor(rainfall_01 * 4), 0, 3).astype(np.uint8)
 	temperature_quadrant = np.clip(np.floor(temperature_01 * 4), 0, 3).astype(np.uint8)

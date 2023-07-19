@@ -515,7 +515,8 @@ def _generate(
 		effective_latitude_deg=climate_effective_latitude_deg,
 		noise=precipitation_noise,
 	)
-	precipitation_cm = precipitation_model.process()
+	precipitation_model.process()
+	precipitation_cm = precipitation_model.precipitation_cm
 	base_precipitation_cm = precipitation_model.base_precipitation_cm
 
 	tprint('Generating graphs')

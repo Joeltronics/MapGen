@@ -4,10 +4,10 @@ from functools import cached_property
 from typing import Final, Optional
 
 import numpy as np
+import scipy.interpolate
 
-from utils.consts import EARTH_POLAR_CIRCUMFERENCE_M, TWOPI
 from utils.image import resize_array, gaussian_blur_map
-from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape, max_abs, gaussian
+from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape, max_abs
 from utils.utils import tprint
 
 from .map_properties import MapProperties
@@ -16,15 +16,15 @@ from .winds import WindModel
 
 
 # TODO: change everything to be in mm instead of cm
-DEFAULT_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
-BASE_PRECIPITATION_RANGE_CM: Final = (5., 200)
+BASE_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
 
 
-# Max orographic rain is 10x the amount, max rain shadow is 1/10 the amount
-OROGRAPHIC_PRECIP_MAX_SCALE: Final = 10.
+# Max orographic rain is 5x the base amount, max rain shadow is 1/5 base
+OROGRAPHIC_PRECIP_MAX_SCALE: Final = 5.
+OROGRAPHIC_PRECIP_MAX_SCALE_LOG10: Final = np.log10(OROGRAPHIC_PRECIP_MAX_SCALE)
 # Max orographic rain or rain shadow is hit when dot product = 0.005
-# TODO: should probably try to soft-clip this
-# (max gradient in earth dataset at 100km scale is around 0.018)
+# (Or it would be, except we use soft-clip)
+# Max gradient in earth dataset at 100km scale is around 0.018
 OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT: Final = 0.005
 
 
@@ -35,11 +35,34 @@ def latitude_precipitation_fn(latitude_radians: np.ndarray) -> np.ndarray:
 	# return 0.4*(np.cos(2*latitude_radians) * 0.5 + 0.5) + 0.6*(np.cos(6*latitude_radians) * 0.5 + 0.5)
 
 
+# Orographic effects are weaker at tropics & arctic
+LATITUDE_OROGRAPHIC_SCALE: Final = [
+	(-0.01, 0.25),
+	(7.5, 0.3),
+	(15, 0.5),
+	(22.5, 0.9),
+	(30, 1.0),
+	(45, 0.9),
+	(60, 0.7),
+	(75, 0.3),
+	(90.01, 0.1),
+]
+_interp_latitude_orographic_scale: Final = scipy.interpolate.interp1d(
+	x=np.radians([val[0] for val in LATITUDE_OROGRAPHIC_SCALE]),
+	y=[val[1] for val in LATITUDE_OROGRAPHIC_SCALE],
+)
+
+def latitude_orographic_scale_fn(latitude_radians: np.ndarray) -> np.ndarray:
+	return _interp_latitude_orographic_scale(np.abs(latitude_radians))
+
+# latitude_orographic_scale_fn = None  # DEBUG
+
+
 def _calculate_base_precipitation(
 		noise: Optional[np.ndarray],
 		latitude_deg: np.ndarray,
 		noise_strength=0.25,
-		precipitation_range_cm=DEFAULT_PRECIPITATION_RANGE_CM,
+		precipitation_range_cm=BASE_PRECIPITATION_RANGE_CM,
 		) -> np.ndarray:
 
 	if noise is not None:
@@ -111,12 +134,14 @@ class PrecipitationModel:
 		gradient_x, gradient_y = self._terrain.gradient_1000km
 		return (wind_x * gradient_x) + (wind_y * gradient_y)
 
-	def wind_dir_dot_gradient_at_scale(self, scale_km):
+	def _wind_dir_dot_gradient_at_scale(self, scale_km):
 
 		if scale_km == 100:
 			return self.wind_dir_dot_gradient_100km
 		elif scale_km == 1000:
 			return self.wind_dir_dot_gradient_1000km
+
+		# TODO: do gaussian_blur_map & gradient_at_scale with resize=True, then resize back to full resolution after
 
 		wind_x, wind_y = self._wind.direction
 		wind_x = gaussian_blur_map(wind_x, sigma_km=scale_km, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
@@ -130,12 +155,15 @@ class PrecipitationModel:
 		Orographic precipitation (where wind is going uphill)
 		"""
 		# TODO: May even want smaller scale than this? 10km?
-		return rescale(
-			self.wind_dir_dot_gradient_100km,
-			range_in=(0.0, OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT),
-			range_out=(0.0, np.log10(OROGRAPHIC_PRECIP_MAX_SCALE)),
-			clip=True,
-		)
+
+		# Rescale from (0.0, OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT) to (0.0, OROGRAPHIC_PRECIP_MAX_SCALE_LOG10),
+		# but with soft-clip at top end
+
+		ret = self.wind_dir_dot_gradient_100km / OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT
+		np.maximum(ret, 0.0, out=ret)
+		np.tanh(ret, out=ret)
+		ret *= OROGRAPHIC_PRECIP_MAX_SCALE_LOG10
+		return ret
 
 	@cached_property
 	def rain_shadow_scale_simple_log10(self):
@@ -177,12 +205,11 @@ class PrecipitationModel:
 		shadows = []
 		for scale_km in SCALES:
 			# Compensate for scale - i.e. 100 km gradient will have approx 10x range of 1000 km gradient
-			this_shadow = rescale(
-				self.wind_dir_dot_gradient_at_scale(scale_km),
-				range_in=(0.0, -OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT * 100 / scale_km),
-				range_out=(0.0, -np.log10(OROGRAPHIC_PRECIP_MAX_SCALE)),
-				clip=True,
-			)
+			mag_scale = (scale_km / 100) * (-1 / OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT)
+			this_shadow = mag_scale * self._wind_dir_dot_gradient_at_scale(scale_km)
+			# Clip to >= 0 only (will soft-clip to <= 1 later, after averaging/maxing)
+			np.maximum(this_shadow, 0.0, out=this_shadow)
+			this_shadow = self._resize(this_shadow, force_copy=False)
 			shadows.append(this_shadow)
 
 		assert len(shadows) == len(SCALES)
@@ -197,6 +224,9 @@ class PrecipitationModel:
 		else:
 			shadow = sum(shadows) / len(shadows)
 
+		np.tanh(shadow, out=shadow)
+		shadow *= -OROGRAPHIC_PRECIP_MAX_SCALE_LOG10
+
 		return shadow
 
 	def clear_cache(self):
@@ -206,7 +236,7 @@ class PrecipitationModel:
 		del self.orographic_precipitation_scale_log10
 		del self.rain_shadow_scale_simple_log10
 
-	def process(self, keep_cache=False) -> np.ndarray:
+	def process(self, keep_cache=False):
 
 		# Base precipitation from latitude
 
@@ -218,10 +248,14 @@ class PrecipitationModel:
 		# TODO: where there's overlap, shadow should "win"
 
 		tprint("Calculating orographic precipitation")
-		scale_log10 = self.orographic_precipitation_scale_log10
+		scale_log10 = self.orographic_precipitation_scale_log10.copy()
 		tprint("Calculating orographic shadows")
 		scale_log10 += self.rain_shadow_scale_simple_log10
 		tprint("Calculating final precipitation")
+
+		if latitude_orographic_scale_fn is not None:
+			scale_log10 *= latitude_orographic_scale_fn(self._properties.latitude_column_radians)
+
 		scale = np.power(10.0, scale_log10)
 
 		rain_cm = base_precipitation_cm * scale
@@ -235,8 +269,6 @@ class PrecipitationModel:
 		if not keep_cache:
 			self.clear_cache()
 
-		return self._precipitation_cm
-
 
 def main(args=None):
 	import argparse
@@ -249,28 +281,42 @@ def main(args=None):
 
 	from .test_datasets import get_test_datasets
 
-	# TODO: de-duplicate this from winds.py
-
-	parser = argparse.ArgumentParser()
-	mx = parser.add_mutually_exclusive_group()
-	mx.add_argument('--test', dest='test_shapes_only', action='store_true', help='Only run simple test shapes')
-	mx.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
-	mx.add_argument('--fullres', action='store_true', help='Include full resolution simulation')
-	args = parser.parse_args(args)
+	# TODO: de-duplicate much this from winds.py
 
 	MAX_ARROWS_HEIGHT_STANDARD: Final = 180 // 5
 	MAX_ARROWS_HEIGHT_HIGH_RES: Final = 180 // 2
 
-	standard_res_earth = not (args.test_shapes_only or args.fullres)
-	lower_res_earth = args.multires
-	earth_regions = standard_res_earth
-	test_shapes = args.test_shapes_only or not args.fullres
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--test', dest='test_shapes', action='store_true', help='Only run simple test shapes')
+	parser.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
+	parser.add_argument('--fullres', action='store_true', help='Full-resolution Earth simulation')
+	args = parser.parse_args(args)
+
+	earth_standard_res = False
+	earth_lower_res = False
+	earth_regions = False
+	test_shapes = False
+	debug_graph = False
+
+	if args.multires:
+		earth_standard_res = True
+		earth_lower_res = True
+
+	if args.test_shapes:
+		test_shapes = True
+		debug_graph = True
+
+	if not any([args.fullres, args.multires, args.test_shapes]):
+		earth_standard_res = True
+		earth_regions = True
+		test_shapes = True
+		debug_graph = True
 
 	datasets = get_test_datasets(
 		earth_3600 = args.fullres,
-		earth_1024 = standard_res_earth,
-		earth_256 = lower_res_earth,
-		earth_1024_flat = lower_res_earth,
+		earth_1024 = earth_standard_res,
+		earth_256 = earth_lower_res,
+		earth_1024_flat = earth_lower_res,
 		africa = earth_regions,
 		north_america = earth_regions,
 		south_america = earth_regions,
@@ -280,14 +326,26 @@ def main(args=None):
 		lines = test_shapes,
 	)
 
-	fig, ax = plt.subplots(1, 1)
-	latitude_rads = np.linspace(-0.5*np.pi, 0.5*np.pi, num=361, endpoint=True)
-	base_precip = rescale(latitude_precipitation_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
-	ticks = np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True)
-	ax.plot(np.degrees(latitude_rads), base_precip)
-	ax.set_title('Base precipitation by latitude (cm)')
-	ax.grid()
-	ax.set_xticks(ticks)
+	if debug_graph:
+		fig, ax = plt.subplots(2, 1)
+		latitude_rads = np.linspace(-0.5*np.pi, 0.5*np.pi, num=361, endpoint=True)
+		base_precip = rescale(latitude_precipitation_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
+		ticks = np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True)
+		ax[0].plot(np.degrees(latitude_rads), base_precip)
+		ax[0].set_title('Base precipitation by latitude (cm)')
+		ax[0].grid()
+		ax[0].set_xticks(ticks)
+		ax[0].set_xlim([-90, 90])
+		if latitude_orographic_scale_fn is not None:
+			orographic_scale = latitude_orographic_scale_fn(latitude_rads)
+		else:
+			orographic_scale = np.ones_like(latitude_rads)
+		ax[1].plot(np.degrees(latitude_rads), orographic_scale)
+		ax[1].set_title('Strength of orographic effects by latitude (cm)')
+		ax[1].grid()
+		ax[1].set_xticks(ticks)
+		ax[1].set_xlim([-90, 90])
+		ax[1].set_ylim([0.0, 1.1])
 
 	for dataset in datasets:
 		dataset_title = dataset['title']
@@ -415,20 +473,25 @@ def main(args=None):
 			if title:
 				if add_range_to_title:
 					dr = data_range(data)
-					title += f'\n[{dr[0]:.2g}, {dr[1]:.2g}]'
+					# HACK: Hard-coded for displaying large rainfall ranges (without switching to scientific)
+					if 0 <= dr[0] < 1000 and 10 <= dr[1] < 10000:
+						title += f'\n[{dr[0]:.2f}, {dr[1]:.1f}]'
+					else:
+						title += f'\n[{dr[0]:.2g}, {dr[1]:.2g}]'
 				ax.set_title(title)
 
 			return ax
 
 		fig.suptitle(dataset_title)
 
-		# _plot(gs[0, 0], terrain.elevation_m, title='Elevation (m)', cmap='inferno')
 		_plot(gs[0, 0], terrain.elevation_100km, title='Elevation 100km blur', cmap='inferno')
 		_plot(gs[0, 1], terrain.gradient_magnitude_100km, title='100km Gradient mag', cmap='inferno')
 
-		dot_max = max(max_abs(rain_sim.wind_dir_dot_gradient_100km), max_abs(rain_sim.wind_dir_dot_gradient_1000km) * 10)
-		_plot(gs[0, 2], rain_sim.wind_dir_dot_gradient_100km, title='Wind dir dot 100k grad', cmap='bwr_r', vmin=-dot_max, vmax=dot_max)
-		_plot(gs[0, 3], rain_sim.wind_dir_dot_gradient_1000km, title='Wind dir dot 1000k grad', cmap='bwr_r', vmin=-dot_max/10, vmax=dot_max/10)
+		dot_100km = rain_sim._wind_dir_dot_gradient_at_scale(100)
+		dot_1000km = rain_sim._wind_dir_dot_gradient_at_scale(1000)
+		dot_max = max(max_abs(dot_100km), 10 * max_abs(dot_1000km))
+		_plot(gs[0, 2], dot_100km, title='Wind dir dot 100k grad', cmap='bwr_r', vmin=-dot_max, vmax=dot_max)
+		_plot(gs[0, 3], dot_1000km, title='Wind dir dot 1000k grad', cmap='bwr_r', vmin=-dot_max/10, vmax=dot_max/10)
 
 		elevation_im = terrain.elevation_m.copy()
 
@@ -440,7 +503,8 @@ def main(args=None):
 			ax_main, rain_sim.precipitation_cm,
 			cmap='Spectral',
 			alpha=0.75,
-			title='Precipitation/Wind/Elevation')
+			title='Precipitation/Wind/Elevation',
+			vmin=0, vmax=1000)
 		ax_main.quiver(
 			arrow_locs_x, arrow_locs_y, arrows_x_norm, arrows_y_norm,
 			color='white', alpha=0.25, **quiver_kwargs)
@@ -451,7 +515,7 @@ def main(args=None):
 		_plot(ax_relative, delta_precip, title='Relative to Base',
 			alpha=0.75,
 			cmap='bwr_r',
-			norm=colors.LogNorm(vmin=0.1, vmax=10.),
+			norm=colors.LogNorm(vmin=1/OROGRAPHIC_PRECIP_MAX_SCALE, vmax=OROGRAPHIC_PRECIP_MAX_SCALE),
 		)
 
 		_plot(gs[2, 2], rain_sim.orographic_precipitation_scale_log10, title='Orographic (log10)')

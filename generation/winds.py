@@ -80,9 +80,13 @@ _wind_dir_interpolator = scipy.interpolate.interp1d(
 REDUCE_WIND_SPEED_ON_LAND: Final = 4.0
 MAX_GRADIENT_DIRECTION_SHIFT: Final = 0.75
 MAX_GRADIENT_DIRECTION_SHIFT_DOWNHILL: Final = 0.5
-HILL_MAP_LAND_SCALE: Final = 2.0
+
+# Elevation wind shift is currently disabled because it causes problems for orographic rainfall model
+# In practice, orographic rain should be based on wind *before* elevation shift
+# TODO: re-enable this
 # HILL_MAP_ELEVATION_SCALE: Final = 1.0/6000.0
-HILL_MAP_ELEVATION_SCALE: Final = 0.  # TEMPORARY: set to 0 while working on orographic rainfall
+HILL_MAP_ELEVATION_SCALE: Final = 0.
+HILL_MAP_LAND_SCALE: Final = 2.0
 HILL_MAP_GRADIENT_SCALE: Final = 1e6
 
 
