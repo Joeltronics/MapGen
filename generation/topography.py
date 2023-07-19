@@ -190,6 +190,9 @@ def scale_topography_for_water_level(topography_norm: np.ndarray, water_amount=0
 		topography_norm = np.power(topography_norm, power)
 		topography_norm = topography_norm * 2.0 - 1.0
 
+		land = topography_norm >= 0
+		ocean = np.logical_not(land)
+
 	else:
 		water_level = water_amount * 2.0 - 1.0
 
@@ -197,13 +200,26 @@ def scale_topography_for_water_level(topography_norm: np.ndarray, water_amount=0
 		max_elevation = 1.0 - water_level
 		min_elevation = -1.0 - water_level
 
-		topography_norm[topography_norm >= 0] = rescale(topography_norm[topography_norm >= 0], (0.0, max_elevation), (0.0, 1.0))
-		topography_norm[topography_norm < 0] = rescale(topography_norm[topography_norm < 0], (0.0, min_elevation), (0.0, -1.0))
+		land = topography_norm >= 0
+		ocean = np.logical_not(land)
 
-	# For flat areas by shores, continental shelves, etc
-	# TODO: steeper continental shelf dropoff
-	topography_norm[topography_norm >= 0] = np.square(topography_norm[topography_norm >= 0])
-	topography_norm[topography_norm < 0] = -np.square(topography_norm[topography_norm < 0])
+		topography_norm[land] = rescale(topography_norm[land], (0.0, max_elevation), (0.0, 1.0))
+		topography_norm[ocean] = rescale(topography_norm[ocean], (0.0, min_elevation), (0.0, -1.0))
+
+	# For flat areas by shores, and to make the highest mountains relatively rare
+	topography_norm[land] = np.power(topography_norm[land], 3.0)
+
+	# topography_norm[ocean] = -np.square(topography_norm[ocean])
+
+	# Abyssal plain
+	# y = 0.5 * (2*x + 1)^3 - 0.5
+	topography_norm[ocean] = 0.5 * (2 * topography_norm[ocean] + 1) ** 3.0 - 0.5
+
+	# Continental shelf
+	# shelf = np.logical_and(ocean, topography_norm > -0.1)
+	shelf_scale = rescale(topography_norm, (-0.2, -0.1), (1., 0.25), clip=True)
+	shelf_scale[land] = 1.
+	topography_norm *= shelf_scale
 
 	return topography_norm
 

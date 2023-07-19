@@ -339,7 +339,7 @@ def debug_graph(water_amount):
 	latitude_temp = np.cos(2 * latitude_rad) * 0.5 + 0.5
 	latitude_precipitation_map = latitude_precipitation_fn(latitude_rad)
 
-	elevation_in = np.linspace(-1, 1, num=256)
+	elevation_in = np.linspace(-1, 1, num=512)
 	elevation_out = scale_topography_for_water_level(elevation_in, water_amount=water_amount)
 	# TODO: apply elevation colormap instead
 	elevation_in_ocean = elevation_in[elevation_out <= 0]
