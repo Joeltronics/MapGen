@@ -558,7 +558,7 @@ def get_antarctica_greenland_mask() -> np.ndarray:
 	mask = _import_img(filename, as_float=True, pixel_range=(0, 254))
 
 	# Actual is 8640 x 4320, resize to 3600x1800
-	mask = resize_array(mask, (3600, 1800), data_range=(0, 255))
+	mask = resize_array(mask, (3600, 1800))
 
 	mask = np.logical_not(np.isnan(mask))
 

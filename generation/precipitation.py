@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from functools import cached_property
+from functools import cached_property, lru_cache
 from typing import Final, Optional
 
 import numpy as np
@@ -91,6 +91,7 @@ class PrecipitationModel:
 			effective_latitude_deg: Optional[np.ndarray],
 			noise: np.ndarray,
 			noise_strength = 0.25,
+			high_quality = False,
 			):
 		self._properties = map_properties
 		self._terrain = terrain
@@ -99,6 +100,7 @@ class PrecipitationModel:
 		self._effective_latitude_deg = effective_latitude_deg if (effective_latitude_deg is not None) else map_properties.latitude_map
 		self._noise = noise
 		self._noise_strength = noise_strength
+		self._high_quality = high_quality
 
 		self._precipitation_cm = None
 
@@ -118,36 +120,40 @@ class PrecipitationModel:
 			precipitation_range_cm=BASE_PRECIPITATION_RANGE_CM,
 		)
 
-	@cached_property
-	def wind_dir_dot_gradient_100km(self):
-		wind_x, wind_y = self._wind.direction
-		wind_x = gaussian_blur_map(wind_x, sigma_km=100, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		wind_y = gaussian_blur_map(wind_y, sigma_km=100, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		gradient_x, gradient_y = self._terrain.gradient_100km
-		return (wind_x * gradient_x) + (wind_y * gradient_y)
+	def _resize(self, arr: np.ndarray, force_copy=True) -> np.ndarray:
+		return resize_array(arr, (self._properties.width, self._properties.height), force_copy=force_copy)
 
-	@cached_property
-	def wind_dir_dot_gradient_1000km(self):
-		wind_x, wind_y = self._wind.direction
-		wind_x = gaussian_blur_map(wind_x, sigma_km=1000, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		wind_y = gaussian_blur_map(wind_y, sigma_km=1000, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		gradient_x, gradient_y = self._terrain.gradient_1000km
-		return (wind_x * gradient_x) + (wind_y * gradient_y)
+	@lru_cache
+	def _wind_dir_dot_gradient_at_scale(self, scale_km, resize=True):
+		"""
+		:param resize: if True, can return a smaller image; if False, will always return the full size (though may still use internal resizing)
+		"""
 
-	def _wind_dir_dot_gradient_at_scale(self, scale_km):
-
-		if scale_km == 100:
-			return self.wind_dir_dot_gradient_100km
-		elif scale_km == 1000:
-			return self.wind_dir_dot_gradient_1000km
-
-		# TODO: do gaussian_blur_map & gradient_at_scale with resize=True, then resize back to full resolution after
+		blur_kwargs = dict(
+			sigma_km=scale_km,
+			flat_map=self._properties.flat,
+			latitude_span=self._properties.latitude_span,
+		)
+		common_kwargs = dict(
+			resize=True,
+			truncate=(4 if self._high_quality else 2),
+			resize_target_sigma_px=(8 if self._high_quality else 2),
+		)
 
 		wind_x, wind_y = self._wind.direction
-		wind_x = gaussian_blur_map(wind_x, sigma_km=scale_km, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		wind_y = gaussian_blur_map(wind_y, sigma_km=scale_km, flat_map=self._properties.flat, latitude_span=self._properties.latitude_span)
-		gradient_x, gradient_y = self._terrain.gradient_at_scale(scale_km=scale_km)
-		return (wind_x * gradient_x) + (wind_y * gradient_y)
+		wind_x = gaussian_blur_map(wind_x, **blur_kwargs, **common_kwargs)
+		wind_y = gaussian_blur_map(wind_y, **blur_kwargs, **common_kwargs)
+		gradient_x, gradient_y = self._terrain.gradient_at_scale(scale_km=scale_km, **common_kwargs)
+
+		assert wind_x.shape == wind_y.shape == gradient_x.shape == gradient_y.shape, \
+			f"{wind_x.shape=}, {wind_y.shape=}, {gradient_x.shape=}, {gradient_y.shape=}"
+
+		ret = (wind_x * gradient_x) + (wind_y * gradient_y)
+
+		if not resize:
+			ret = self._resize(ret, force_copy=False)
+
+		return ret
 
 	@cached_property
 	def orographic_precipitation_scale_log10(self):
@@ -158,11 +164,11 @@ class PrecipitationModel:
 
 		# Rescale from (0.0, OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT) to (0.0, OROGRAPHIC_PRECIP_MAX_SCALE_LOG10),
 		# but with soft-clip at top end
-
-		ret = self.wind_dir_dot_gradient_100km / OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT
+		ret = self._wind_dir_dot_gradient_at_scale(100) / OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT
 		np.maximum(ret, 0.0, out=ret)
 		np.tanh(ret, out=ret)
 		ret *= OROGRAPHIC_PRECIP_MAX_SCALE_LOG10
+		ret = self._resize(ret, force_copy=False)
 		return ret
 
 	@cached_property
@@ -202,14 +208,42 @@ class PrecipitationModel:
 		# SCALES = [100, 162, 262, 424, 685, 1109, 1794]  # golden ratio (1.618)
 		# SCALES = [100, 141, 200, 316, 500, 1000, 1414]  # approx sqrt(2)
 
+		"""
+		If False:
+			1. Calculate dot products at low resolution
+			2. Scale each to full resolution
+			3. Average & soft-clip
+		If True:
+			1. Calculate dot products at low resolution
+			2. Scale each to the largest dot product resolution (i.e. smallest scale)
+			3. Average & soft-clip
+			4. Scale result to full resolution
+		"""
+		INTERNAL_RESOLUTION_USE_LOWEST_SCALE = True
+
 		shadows = []
+		resize_resolution = None
 		for scale_km in SCALES:
 			# Compensate for scale - i.e. 100 km gradient will have approx 10x range of 1000 km gradient
 			mag_scale = (scale_km / 100) * (-1 / OROGRAPHIC_PRECIP_MAX_GRADIENT_DOT_PRODUCT)
 			this_shadow = mag_scale * self._wind_dir_dot_gradient_at_scale(scale_km)
 			# Clip to >= 0 only (will soft-clip to <= 1 later, after averaging/maxing)
 			np.maximum(this_shadow, 0.0, out=this_shadow)
-			this_shadow = self._resize(this_shadow, force_copy=False)
+
+			if not INTERNAL_RESOLUTION_USE_LOWEST_SCALE:
+				# print(f'Shadow scale {scale_km} km, resolution {(this_shadow.shape[1], this_shadow.shape[0])}'
+				# 	f'scaling to final resolution {(self._properties.width, self._properties.height)}')  # DEBUG
+				this_shadow = self._resize(this_shadow, force_copy=False)
+			elif resize_resolution is None:
+				resize_resolution = (this_shadow.shape[1], this_shadow.shape[0])
+				# print(f'Shadow scale {scale_km} km, resolution {resize_resolution}')  # DEBUG
+			else:
+				assert resize_resolution[0] >= this_shadow.shape[1] and resize_resolution[1] >= this_shadow.shape[0], \
+					f"{resize_resolution=}, {this_shadow.shape=}"
+				# print(f'Shadow scale {scale_km} km, resolution {(this_shadow.shape[1], this_shadow.shape[0])}, '
+				# 	f'scaling to {resize_resolution}')  # DEBUG
+				this_shadow = resize_array(this_shadow, resize_resolution, force_copy=False)
+
 			shadows.append(this_shadow)
 
 		assert len(shadows) == len(SCALES)
@@ -227,12 +261,16 @@ class PrecipitationModel:
 		np.tanh(shadow, out=shadow)
 		shadow *= -OROGRAPHIC_PRECIP_MAX_SCALE_LOG10
 
+		if INTERNAL_RESOLUTION_USE_LOWEST_SCALE:
+			# print(f'Scaling shadows to final resolution {(self._properties.width, self._properties.height)}')  # DEBUG
+			shadow = self._resize(shadow, force_copy=False)
+
 		return shadow
 
+
 	def clear_cache(self):
-		# Keep base_precipitation_cm
-		del self.wind_dir_dot_gradient_100km
-		# del self.wind_dir_dot_gradient_1000km  # gives AttributeError for some reason? (TODO: figure out why)
+		# Keep base_precipitation_cm, as the main generator still uses it
+		self._wind_dir_dot_gradient_at_scale.cache_clear()
 		del self.orographic_precipitation_scale_log10
 		del self.rain_shadow_scale_simple_log10
 
@@ -290,6 +328,7 @@ def main(args=None):
 	parser.add_argument('--test', dest='test_shapes', action='store_true', help='Only run simple test shapes')
 	parser.add_argument('--multires', action='store_true', help='Run earth simulation at multiple resolutions')
 	parser.add_argument('--fullres', action='store_true', help='Full-resolution Earth simulation')
+	parser.add_argument('--hq', action='store_true', help='Compare low & high quality')
 	args = parser.parse_args(args)
 
 	earth_standard_res = False
@@ -325,6 +364,19 @@ def main(args=None):
 		circle = test_shapes,
 		lines = test_shapes,
 	)
+
+	if args.hq:
+		datasets_out = []
+		for dataset in datasets:
+			dataset_lq = dict(dataset)
+			dataset_hq = dict(dataset)
+			dataset_lq['high_quality'] = False
+			dataset_lq['title'] += ' (LQ)'
+			dataset_hq['high_quality'] = True
+			dataset_hq['title'] += ' (HQ)'
+			datasets_out.append(dataset_lq)
+			datasets_out.append(dataset_hq)
+		datasets = datasets_out
 
 	if debug_graph:
 		fig, ax = plt.subplots(2, 1)
@@ -395,6 +447,7 @@ def main(args=None):
 			effective_latitude_deg=None,
 			noise=None,
 			noise_strength=0.0,
+			high_quality=dataset.get('high_quality', False)
 		)
 		rain_sim.process(keep_cache=True)
 

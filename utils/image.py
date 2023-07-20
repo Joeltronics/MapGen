@@ -4,7 +4,7 @@ import colorsys
 from contextlib import contextmanager
 from math import ceil, floor, isclose, log2
 from numbers import Number
-from typing import Final, Optional, Tuple, Union, Literal
+from typing import Any, Final, Optional, Tuple, Union, Literal
 import warnings
 
 import colour
@@ -244,17 +244,25 @@ def alpha_to_nan(arr: np.ndarray, *, nan_thresh: Number = 0) -> np.ndarray:
 def resize_array(
 		arr: np.ndarray,
 		new_size: Tuple[int, int],  # TODO: change these to separate width & height arguments, so keywords should prvent getting dimensions swapped around
-		data_range: Optional[Tuple[float, float]] = None,
+		*,
 		resampling = Image.BILINEAR,
+		force = False,
+		force_copy = True,
 		verbose = False,
 		) -> np.ndarray:
 	"""
 	:param new_size: in image dimensions, i.e. (width, height)
-	:param data_range: deprecated
+	:param force: If False, will skip processing if array is already new_size; if True, runs processing anyway
+	:param force_copy: If False, will return the same array if array is already new_size; if True, will return a copy
 	"""
 
+	width, height = new_size
+
 	if len(arr.shape) not in [2, 3]:
-		raise ValueError(f'Array must have 2 or 3 dimensions (shape={arr.shape})')
+		raise ValueError(f'Array must have 2 or 3 dimensions ({arr.shape=})')
+
+	if (not force) and (arr.shape[0] == height) and (arr.shape[1] == width):
+		return arr.copy() if force_copy else arr
 
 	input_dtype = arr.dtype
 

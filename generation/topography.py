@@ -103,14 +103,16 @@ class Terrain:
 
 	def gradient_at_scale(
 			self,
-			scale_km,
-			resize: Literal[False, 'internal', True] = 'internal',
+			scale_km: float,
+			resize: bool = False,
+			truncate = 4.0,
+			resize_target_sigma_px = 8.0,
 			_allow_cached_properties=True,
 			) -> tuple[np.ndarray, np.ndarray]:
 
 		# _allow_cached_properties to prevent recursion loop
 		# TODO: instead of needing _allow_cached_properties argument, check if property is already cached
-		if _allow_cached_properties:
+		if _allow_cached_properties and (not resize) and (truncate == 4) and (resize_target_sigma_px == 8):
 			if scale_km == 100:
 				return self.gradient_100km
 			elif scale_km == 1000:
@@ -122,7 +124,10 @@ class Terrain:
 			flat_map=self._map_properties.flat,
 			latitude_span=self._map_properties.latitude_span,
 			magnitude=False,
-			resize=resize,
+			truncate=truncate,
+			# "resize" parameter is just a bool, convert it to what map_gradient actually takes
+			resize=(resize or 'internal'),
+			resize_target_sigma_px=resize_target_sigma_px,
 		)
 
 	def gradient_magnitude_at_scale(self, scale_km, _allow_cached_properties=True) -> np.ndarray:
@@ -173,7 +178,7 @@ def get_earth_topography(map_properties: MapProperties) -> Terrain:
 	topography_m[ocean_mask] = np.minimum(topography_m[ocean_mask], -min_land_elevation_m)
 
 	if needs_resize:
-		topography_m = resize_array(topography_m, (width, height), data_range=ELEVATION_DATA_RANGE)
+		topography_m = resize_array(topography_m, (width, height))
 
 	topography_norm = rescale(topography_m, (-8000., 8000.), (-1., 1.))
 
