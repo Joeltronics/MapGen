@@ -15,8 +15,7 @@ from .topography import Terrain
 from .winds import WindModel
 
 
-# TODO: change everything to be in mm instead of cm
-BASE_PRECIPITATION_RANGE_CM: Final = (0.5, 400)
+BASE_PRECIPITATION_RANGE_MM: Final = (5, 4000)
 
 
 # Max orographic rain is 5x the base amount, max rain shadow is 1/5 base
@@ -62,7 +61,7 @@ def _calculate_base_precipitation(
 		noise: Optional[np.ndarray],
 		latitude_deg: np.ndarray,
 		noise_strength=0.25,
-		precipitation_range_cm=BASE_PRECIPITATION_RANGE_CM,
+		precipitation_range_mm=BASE_PRECIPITATION_RANGE_MM,
 		) -> np.ndarray:
 
 	if noise is not None:
@@ -77,8 +76,8 @@ def _calculate_base_precipitation(
 	else:
 		precip_01 = latitude_precip_map
 
-	precip_cm = rescale(precip_01, (0.0, 1.0), precipitation_range_cm)
-	return precip_cm
+	precip_mm = rescale(precip_01, (0.0, 1.0), precipitation_range_mm)
+	return precip_mm
 
 
 class PrecipitationModel:
@@ -102,22 +101,22 @@ class PrecipitationModel:
 		self._noise_strength = noise_strength
 		self._high_quality = high_quality
 
-		self._precipitation_cm = None
+		self._precipitation_mm = None
 
 	@property
-	def precipitation_cm(self) -> np.ndarray:
-		if self._precipitation_cm is None:
+	def precipitation_mm(self) -> np.ndarray:
+		if self._precipitation_mm is None:
 			self.process()
-		assert self._precipitation_cm is not None
-		return self._precipitation_cm
+		assert self._precipitation_mm is not None
+		return self._precipitation_mm
 
 	@cached_property
-	def base_precipitation_cm(self):
+	def base_precipitation_mm(self):
 		return _calculate_base_precipitation(
 			noise=self._noise,
 			latitude_deg=self._effective_latitude_deg,
 			noise_strength=self._noise_strength,
-			precipitation_range_cm=BASE_PRECIPITATION_RANGE_CM,
+			precipitation_range_mm=BASE_PRECIPITATION_RANGE_MM,
 		)
 
 	def _resize(self, arr: np.ndarray, force_copy=True) -> np.ndarray:
@@ -269,7 +268,7 @@ class PrecipitationModel:
 
 
 	def clear_cache(self):
-		# Keep base_precipitation_cm, as the main generator still uses it
+		# Keep base_precipitation_mm, as the main generator still uses it
 		self._wind_dir_dot_gradient_at_scale.cache_clear()
 		del self.orographic_precipitation_scale_log10
 		del self.rain_shadow_scale_simple_log10
@@ -279,7 +278,7 @@ class PrecipitationModel:
 		# Base precipitation from latitude
 
 		tprint("Calculating base precipitation")
-		base_precipitation_cm = self.base_precipitation_cm
+		base_precipitation_mm = self.base_precipitation_mm
 
 		# Orographic precipitation & rain shadows
 
@@ -296,13 +295,11 @@ class PrecipitationModel:
 
 		scale = np.power(10.0, scale_log10)
 
-		rain_cm = base_precipitation_cm * scale
+		self._precipitation_mm = base_precipitation_mm * scale
 
 		# TODO: also factor in wind vector convergence
 		# Some of this is already accounted for by latitude function, but rainfall should increase anywhere wind model
 		# leads toward additional convergence beyond what is expected for latitude
-
-		self._precipitation_cm = rain_cm
 
 		if not keep_cache:
 			self.clear_cache()
@@ -381,10 +378,10 @@ def main(args=None):
 	if debug_graph:
 		fig, ax = plt.subplots(2, 1)
 		latitude_rads = np.linspace(-0.5*np.pi, 0.5*np.pi, num=361, endpoint=True)
-		base_precip = rescale(latitude_precipitation_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_CM)
+		base_precip = rescale(latitude_precipitation_fn(latitude_rads), (0, 1), BASE_PRECIPITATION_RANGE_MM)
 		ticks = np.linspace(-90, 90, num=(180 // 15) + 1, endpoint=True)
 		ax[0].plot(np.degrees(latitude_rads), base_precip)
-		ax[0].set_title('Base precipitation by latitude (cm)')
+		ax[0].set_title('Base precipitation by latitude (mm)')
 		ax[0].grid()
 		ax[0].set_xticks(ticks)
 		ax[0].set_xlim([-90, 90])
@@ -393,7 +390,7 @@ def main(args=None):
 		else:
 			orographic_scale = np.ones_like(latitude_rads)
 		ax[1].plot(np.degrees(latitude_rads), orographic_scale)
-		ax[1].set_title('Strength of orographic effects by latitude (cm)')
+		ax[1].set_title('Strength of orographic effects by latitude (mm)')
 		ax[1].grid()
 		ax[1].set_xticks(ticks)
 		ax[1].set_xlim([-90, 90])
@@ -451,7 +448,7 @@ def main(args=None):
 		)
 		rain_sim.process(keep_cache=True)
 
-		delta_precip = rain_sim.precipitation_cm / rain_sim.base_precipitation_cm
+		delta_precip = rain_sim.precipitation_mm / rain_sim.base_precipitation_mm
 
 		tprint('Calculating wind arrows to plot')
 
@@ -553,16 +550,16 @@ def main(args=None):
 
 		ax_main = _plot(gs[1:3, 0:2], elevation_im, cmap='gray', colorbar=False)
 		_plot(
-			ax_main, rain_sim.precipitation_cm,
+			ax_main, rain_sim.precipitation_mm,
 			cmap='Spectral',
 			alpha=0.75,
 			title='Precipitation/Wind/Elevation',
-			vmin=0, vmax=1000)
+			vmin=0, vmax=10000)
 		ax_main.quiver(
 			arrow_locs_x, arrow_locs_y, arrows_x_norm, arrows_y_norm,
 			color='white', alpha=0.25, **quiver_kwargs)
 
-		_plot(gs[1, 2], rain_sim.base_precipitation_cm, title='Base')
+		_plot(gs[1, 2], rain_sim.base_precipitation_mm, title='Base')
 
 		ax_relative = _plot(gs[1, 3], elevation_im, cmap='gray', colorbar=False)
 		_plot(ax_relative, delta_precip, title='Relative to Base',

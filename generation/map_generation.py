@@ -209,7 +209,7 @@ class Planet:
 	prevailing_wind_data: Optional[tuple[np.ndarray, np.ndarray]] = None
 	prevailing_wind_imgs: Optional[list[np.ndarray]] = None
 
-	precipitation_cm: Optional[np.ndarray] = None
+	precipitation_mm: Optional[np.ndarray] = None
 	precipitation_img: Optional[np.ndarray] = None
 	rel_precipitation_img: Optional[np.ndarray] = None
 
@@ -228,16 +228,16 @@ class Planet:
 			climate_effective_latitude_deg: np.ndarray,
 			temperature_C: np.ndarray,
 			prevailing_wind_mps: np.ndarray,
-			precipitation_cm: np.ndarray,
+			precipitation_mm: np.ndarray,
 			flat_map: bool,
-			base_precipitation_cm: Optional[np.ndarray] = None,
+			base_precipitation_mm: Optional[np.ndarray] = None,
 			graph_figure=None,
 			) -> 'Planet':
 
 		topography_m = terrain.terrain_m
 
-		if not (topography_m.shape == temperature_C.shape == precipitation_cm.shape):
-			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_cm.shape}')
+		if not (topography_m.shape == temperature_C.shape == precipitation_mm.shape):
+			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_mm.shape}')
 
 		height, width = topography_m.shape
 
@@ -249,7 +249,7 @@ class Planet:
 		max_abs_elevation = max_abs(topography_m)
 		elevation_11 = rescale(topography_m, range_in=(-max_abs_elevation, max_abs_elevation), range_out=(-1., 1.))
 		temperature_01 = rescale(temperature_C)
-		precipitation_01 = rescale(precipitation_cm)
+		precipitation_01 = rescale(precipitation_mm)
 
 		tprint('Calculating gradient')
 		gradient_x, gradient_y = map_gradient(elevation_above_sea_m, flat_map=flat_map, latitude_span=map_properties.latitude_span)
@@ -261,7 +261,7 @@ class Planet:
 		gradient_img_bw, gradient_img_color = make_gradient_imgs(gradient_x=gradient_x, gradient_y=gradient_y, gradient_mag=gradient_mag)
 
 		tprint('Making image')
-		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, precipitation_cm=precipitation_cm)
+		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, precipitation_mm=precipitation_mm)
 
 		tprint('Making other data views')
 
@@ -275,8 +275,8 @@ class Planet:
 		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=map_properties.latitude_range)
 
 		rel_precipitation_img = None
-		if base_precipitation_cm is not None:
-			rel_precipitation = np.log10(precipitation_cm / base_precipitation_cm)
+		if base_precipitation_mm is not None:
+			rel_precipitation = np.log10(precipitation_mm / base_precipitation_mm)
 			rescale(rel_precipitation, range_in=(-1., 1.), range_out=(0., 1.), in_place=True)
 			rel_precipitation_img = REL_PRECIPITATION_CMAP(rel_precipitation)
 
@@ -286,7 +286,7 @@ class Planet:
 		land_water_img[land_mask, :] = LAND
 		land_water_img[water_mask, :] = WATER
 
-		biomes_img = biome_map(elevation_11=elevation_11, temperature_C=temperature_C, precipitation_cm=precipitation_cm)
+		biomes_img = biome_map(elevation_11=elevation_11, temperature_C=temperature_C, precipitation_mm=precipitation_mm)
 
 		if not flat_map:
 			tprint('Making map projections')
@@ -314,7 +314,7 @@ class Planet:
 			temperature_img=temperature_img,
 			prevailing_wind_data=prevailing_wind_mps,
 			prevailing_wind_imgs=prevailing_wind_imgs,
-			precipitation_cm=precipitation_cm,
+			precipitation_mm=precipitation_mm,
 			precipitation_img=precipitation_img,
 			rel_precipitation_img=rel_precipitation_img,
 			water_data=water_mask,
@@ -516,8 +516,8 @@ def _generate(
 		noise=precipitation_noise,
 	)
 	precipitation_model.process()
-	precipitation_cm = precipitation_model.precipitation_cm
-	base_precipitation_cm = precipitation_model.base_precipitation_cm
+	precipitation_mm = precipitation_model.precipitation_mm
+	base_precipitation_mm = precipitation_model.base_precipitation_mm
 
 	tprint('Generating graphs')
 	graph_figure = debug_graph(water_amount=water_amount)
@@ -529,8 +529,8 @@ def _generate(
 		climate_effective_latitude_deg=climate_effective_latitude_deg,
 		temperature_C=temperature_C,
 		prevailing_wind_mps=prevailing_wind_mps,
-		precipitation_cm=precipitation_cm,
-		base_precipitation_cm=base_precipitation_cm,
+		precipitation_mm=precipitation_mm,
+		base_precipitation_mm=base_precipitation_mm,
 		graph_figure=graph_figure,
 		flat_map=flat_map,
 	)
