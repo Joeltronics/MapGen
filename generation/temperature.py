@@ -34,7 +34,7 @@ def calculate_temperature(
 	# TODO: should this use domain warping instead of interpolation? or combination of both?
 	latitude_temp_map = np.cos(2 * latitude) * 0.5 + 0.5
 
-	temperature_01 = temperature_noise * (1.0 - noise_strength) + latitude_temp_map * noise_strength
+	temperature_01 = temperature_noise * noise_strength + latitude_temp_map * (1.0 - noise_strength)
 
 	# More domain warping over ocean
 	temperature_01[ocean_mask] = np.cos(2 * latitude_turbulent[ocean_mask]) * 0.5 + 0.5
