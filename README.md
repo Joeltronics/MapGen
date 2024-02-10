@@ -52,9 +52,7 @@ Also improve noise-based options:
 
 ## Real data processing
 
--
-
-
+There are some basics implemented, but they're not incorporated into the generation yet
 
 ## FAQ
 
@@ -82,6 +80,10 @@ Other TODO items:
 	* Options to specify what's on each side of the map (e.g. ocean, mountains, desert, etc)
 * Option to regenerate a region of a map at higher resolution
 * Better options for saving files
+* Improve UI
+	* Gradio is great because it was quick to implement, but the result is pretty basic
+	* Would like something more akin to Google Earth
+	* Not sure if the way to go is a full custom JS UI, or custom components within Gradio
 
 ### Engine & Performance
 
