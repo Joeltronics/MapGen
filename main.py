@@ -21,6 +21,7 @@ def main():
 	subparsers.add_parser('run', help="Run Gradio UI", **common_kwarg)
 	subparsers.add_parser('data', help="Download & show NASA data", **common_kwarg).set_defaults(module='data')
 	subparsers.add_parser('process', help="Process NASA data", **common_kwarg).set_defaults(module='process_data')
+	subparsers.add_parser('temperature', help="Test Temperature simulation", **common_kwarg).set_defaults(module='generation.temperature')
 	subparsers.add_parser('wind', help="Test wind simulation", **common_kwarg).set_defaults(module='generation.winds')
 	subparsers.add_parser('rain', help="Test precipitation simulation", **common_kwarg).set_defaults(module='generation.precipitation')
 

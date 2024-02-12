@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, unique
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import gradio as gr
 import matplotlib
@@ -100,17 +100,52 @@ def gradio_callback_map_generator(
 
 	elevation_imgs = [planet.elevation_img, planet.gradient_img_bw, planet.gradient_img_color, planet.erosion_img]
 
-	def sanitize(items):
+	def sanitize(items: None | np.ndarray | list[np.ndarray] | dict[Any, np.ndarray]) -> list[np.ndarray]:
+
 		if isinstance(items, np.ndarray):
 			return [items]
-		if not items:
-			return []
-		return [val for val in items if val is not None]
 
-	climate_imgs = \
-		[planet.temperature_img, planet.precipitation_img, planet.rel_precipitation_img] + \
-		planet.prevailing_wind_imgs + \
-		[planet.climate_effective_latitude_img]
+		ret = []
+
+		if not items:
+			items_iter = []
+		elif isinstance(items, dict):
+			# Sorted view
+			items_iter = []
+			for k in sorted(items.keys()):
+				items_iter.append(items[k])
+		else:
+			items_iter = items
+
+		for item in items_iter:
+			if item is None:
+				pass
+			elif isinstance(item, (dict, list)):
+				ret.extend(sanitize(item))
+			else:
+				ret.append(item)
+
+		assert all(isinstance(item, np.ndarray) for item in ret), str([type(item).__name__ for item in ret])
+
+		return ret
+
+	climate_imgs = [
+		planet.temperature_img,
+		planet.precipitation_img, planet.rel_precipitation_img,
+		planet.prevailing_wind_imgs,
+		planet.climate_effective_latitude_img,
+	]
+
+	# if planet.prevailing_wind_imgs:
+	# 	assert isinstance(planet.prevailing_wind_imgs, dict)
+	# 	for imgs in planet.prevailing_wind_imgs.values():
+	# 		climate_imgs.extend(imgs)
+
+	# if planet.prevailing_wind_imgs is not None:
+	# 	climate_imgs.append(planet.prevailing_wind_imgs)
+
+	# if planet.climate_effective_latitude_img is not None:
+	# 	climate_imgs.append(planet.climate_effective_latitude_img)
 
 	return (
 		print_str,

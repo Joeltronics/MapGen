@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from dataclasses import dataclass, field
-from enum import Enum, unique
+from enum import Enum, IntEnum, unique
 from typing import List, Optional, Tuple, Literal, Final
 
 from matplotlib.backends.backend_agg import FigureCanvas
@@ -20,6 +20,7 @@ from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
 from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
 from .winds import WindModel, make_prevailing_wind_imgs
 
+from utils.consts import EARTH_AXIAL_TILT_DEGREES
 from utils.image import float_to_uint8, remap, matplotlib_figure_canvas_to_image, map_gradient
 from utils.map_projection import make_projection_map
 from utils.numeric import data_range, rescale, max_abs
@@ -33,6 +34,7 @@ TODO:
 
 
 PI: Final = np.pi
+SQRT_2: Final = np.sqrt(2.0)
 
 
 @unique
@@ -40,6 +42,14 @@ class GeneratorType(Enum):
 	flat_map = '2D flat map'
 	planet_2d = '2D planet'  # TODO: rename this - "cylinder" or something?
 	planet_3d = '3D planet'
+
+
+@unique
+class Season(IntEnum):
+	no_season = 0
+	southern_summer = 1  # January (roughly)
+	spring_fall = 4  # April/October
+	northern_summer = 7  # July
 
 
 @dataclass
@@ -55,6 +65,7 @@ class ClimateParams:
 	effective_latitude_noise_degrees: float = 5.0
 	pole_C: float = float(DEFAULT_TEMPERATURE_RANGE_C[0])
 	equator_C: float = float(DEFAULT_TEMPERATURE_RANGE_C[1])
+	axial_tilt_degrees: float = EARTH_AXIAL_TILT_DEGREES
 
 
 @dataclass
@@ -185,11 +196,43 @@ def make_gradient_imgs(gradient_x, gradient_y, gradient_mag):
 	return gradient_img_bw, gradient_img_color
 
 
+def average_across_seasons(vals: dict[Season, np.ndarray]) -> np.ndarray:
+
+	if Season.no_season in vals:
+		return vals[Season.no_season]
+
+	if set(vals.keys()) != {Season.spring_fall, Season.northern_summer, Season.southern_summer}:
+		raise KeyError(f'{vals.keys()=}')
+
+	"""
+	Just average the 3 season values
+
+	You might think we should average the 4 seasons - i.e. weight spring_fall twice as heavily
+	This would be equivalent to linearly interpolating from January to April
+	But a lot of climate data is closer to a sinusoid - linear interpolation isn't what we want
+
+	As a rough approximation for a sinusoid, weight summer & winter data twice as heavily,
+	which works out to averaging the 3 values
+
+	TODO: should actually weight summer & winter by 1/sqrt(2) = 0.707, spring & fall by 0.303
+	"""
+
+	# Unoptimized
+	# return sum(vals.items()) / 3.0
+
+	# Slight optimization (less memory allocation with large arrays)
+	ret = vals[Season.spring_fall].copy()
+	ret += vals[Season.northern_summer]
+	ret += vals[Season.southern_summer]
+	ret /= 3.0
+	return ret
+
+
 @dataclass
 class Planet:
-	equirectangular: Optional[np.ndarray] = None
-	polar_azimuthal: Optional[Tuple[np.ndarray, np.ndarray]] = None
-	views: List[np.ndarray] = field(default_factory=list)
+	equirectangular: dict[Season, np.ndarray] = field(default_factory=dict)
+	polar_azimuthal: Optional[Tuple[np.ndarray, np.ndarray]] = None  # TODO: by season
+	views: List[np.ndarray] = field(default_factory=list)  # TODO: by season
 
 	# TODO: latitude_data (for flat map)
 
@@ -203,15 +246,15 @@ class Planet:
 	climate_effective_latitude_deg: Optional[np.ndarray] = None
 	climate_effective_latitude_img: Optional[np.ndarray] = None
 
-	temperature_C: Optional[np.ndarray] = None
-	temperature_img: Optional[np.ndarray] = None
+	temperature_C: dict[Season, np.ndarray] = field(default_factory=dict)
+	temperature_img: dict[Season, np.ndarray] = field(default_factory=dict)
 
-	prevailing_wind_data: Optional[tuple[np.ndarray, np.ndarray]] = None
-	prevailing_wind_imgs: Optional[list[np.ndarray]] = None
+	prevailing_wind_data: dict[Season, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+	prevailing_wind_imgs: dict[Season, list[np.ndarray]] = field(default_factory=dict)
 
-	precipitation_mm: Optional[np.ndarray] = None
-	precipitation_img: Optional[np.ndarray] = None
-	rel_precipitation_img: Optional[np.ndarray] = None
+	precipitation_mm_per_year: dict[Season, np.ndarray] = field(default_factory=dict)
+	precipitation_img: dict[Season, np.ndarray] = field(default_factory=dict)
+	rel_precipitation_img: dict[Season, np.ndarray] = field(default_factory=dict)
 
 	water_data: Optional[np.ndarray] = None
 	land_water_img: Optional[np.ndarray] = None
@@ -225,19 +268,28 @@ class Planet:
 			cls,
 			map_properties: MapProperties,
 			terrain: Terrain,
-			climate_effective_latitude_deg: np.ndarray,
-			temperature_C: np.ndarray,
-			prevailing_wind_mps: np.ndarray,
-			precipitation_mm: np.ndarray,
+			climate_effective_latitude_deg: np.ndarray,  # TODO: by season
+			temperature_C: dict[Season, np.ndarray],
+			prevailing_wind_mps: dict[Season, np.ndarray],
+			precipitation_mm_per_year: dict[Season, np.ndarray],
 			flat_map: bool,
-			base_precipitation_mm: Optional[np.ndarray] = None,
+			base_precipitation_mm_per_year: Optional[dict[Season, np.ndarray]] = None,
 			graph_figure=None,
 			) -> 'Planet':
 
 		topography_m = terrain.terrain_m
 
-		if not (topography_m.shape == temperature_C.shape == precipitation_mm.shape):
-			raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_mm.shape}')
+		# TODO seasons
+		# if not (topography_m.shape == temperature_C.shape == precipitation_mm_per_year.shape):
+		# 	raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_mm_per_year.shape}')
+
+		if temperature_C.keys() != precipitation_mm_per_year.keys():
+			raise ValueError(f'{temperature_C.keys()=} != {precipitation_mm_per_year.keys()=}')
+
+		if Season.no_season not in temperature_C:
+			temperature_C[Season.no_season] = average_across_seasons(temperature_C)
+		if Season.no_season not in precipitation_mm_per_year:
+			precipitation_mm_per_year[Season.no_season] = average_across_seasons(precipitation_mm_per_year)
 
 		height, width = topography_m.shape
 
@@ -248,8 +300,8 @@ class Planet:
 
 		max_abs_elevation = max_abs(topography_m)
 		elevation_11 = rescale(topography_m, range_in=(-max_abs_elevation, max_abs_elevation), range_out=(-1., 1.))
-		temperature_01 = rescale(temperature_C)
-		precipitation_01 = rescale(precipitation_mm)
+		temperature_01 = {k: rescale(v) for k, v in temperature_C.items()}
+		precipitation_01 = {k: rescale(v) for k, v in precipitation_mm_per_year.items()}
 
 		tprint('Calculating gradient')
 		gradient_x, gradient_y = map_gradient(elevation_above_sea_m, flat_map=flat_map, latitude_span=map_properties.latitude_span)
@@ -261,7 +313,15 @@ class Planet:
 		gradient_img_bw, gradient_img_color = make_gradient_imgs(gradient_x=gradient_x, gradient_y=gradient_y, gradient_mag=gradient_mag)
 
 		tprint('Making image')
-		equirectangular = to_image(elevation_11=elevation_11, gradient=(gradient_x, gradient_y), temperature_C=temperature_C, precipitation_mm=precipitation_mm)
+		equirectangular = {}
+		assert temperature_C.keys() == precipitation_mm_per_year.keys()
+		for season in temperature_C.keys():
+			equirectangular[season] = to_image(
+				elevation_11=elevation_11,
+				gradient=(gradient_x, gradient_y),
+				temperature_C=temperature_C[season],
+				precipitation_mm_per_year=precipitation_mm_per_year[season],
+			)
 
 		tprint('Making other data views')
 
@@ -270,15 +330,19 @@ class Planet:
 		climate_effective_latitude_img = EFFECTIVE_LATITUDE_CMAP(climate_effective_latitude_img)
 
 		elevation_img = ELEVATION_CMAP(elevation_11 * 0.5 + 0.5)
-		temperature_img = TEMPERATURE_CMAP(temperature_01)
-		precipitation_img = PRECIPITATION_CMAP(precipitation_01)
-		prevailing_wind_imgs = make_prevailing_wind_imgs(prevailing_wind_mps, latitude_range=map_properties.latitude_range)
+		temperature_img = {k: TEMPERATURE_CMAP(v) for k, v in temperature_01.items()}
+		precipitation_img = {k: PRECIPITATION_CMAP(v) for k, v in precipitation_01.items()}
+		prevailing_wind_imgs = {
+			k: make_prevailing_wind_imgs(v, latitude_range=map_properties.latitude_range)
+			for k, v in prevailing_wind_mps.items()
+		}
 
 		rel_precipitation_img = None
-		if base_precipitation_mm is not None:
-			rel_precipitation = np.log10(precipitation_mm / base_precipitation_mm)
-			rescale(rel_precipitation, range_in=(-1., 1.), range_out=(0., 1.), in_place=True)
-			rel_precipitation_img = REL_PRECIPITATION_CMAP(rel_precipitation)
+		# TODO seasons
+		# if base_precipitation_mm_per_year is not None:
+		# 	rel_precipitation = np.log10(precipitation_mm_per_year / base_precipitation_mm_per_year)
+		# 	rescale(rel_precipitation, range_in=(-1., 1.), range_out=(0., 1.), in_place=True)
+		# 	rel_precipitation_img = REL_PRECIPITATION_CMAP(rel_precipitation)
 
 		erosion_img = EROSION_CMAP(rescale(-terrain.erosion)) if (terrain.erosion is not None) else None
 
@@ -286,12 +350,16 @@ class Planet:
 		land_water_img[land_mask, :] = LAND
 		land_water_img[water_mask, :] = WATER
 
-		biomes_img = biome_map(elevation_11=elevation_11, temperature_C=temperature_C, precipitation_mm=precipitation_mm)
+		biomes_img = biome_map(
+			elevation_11=elevation_11,
+			temperature_C=temperature_C[Season.no_season],
+			precipitation_mm_per_year=precipitation_mm_per_year[Season.no_season],
+		)
 
 		if not flat_map:
 			tprint('Making map projections')
-			views = make_views(equirectangular)
-			polar_azimuthal = make_polar_azimuthal(equirectangular)
+			views = make_views(equirectangular[Season.no_season])
+			polar_azimuthal = make_polar_azimuthal(equirectangular[Season.no_season])
 		else:
 			views = None
 			polar_azimuthal = None
@@ -314,7 +382,7 @@ class Planet:
 			temperature_img=temperature_img,
 			prevailing_wind_data=prevailing_wind_mps,
 			prevailing_wind_imgs=prevailing_wind_imgs,
-			precipitation_mm=precipitation_mm,
+			precipitation_mm_per_year=precipitation_mm_per_year,
 			precipitation_img=precipitation_img,
 			rel_precipitation_img=rel_precipitation_img,
 			water_data=water_mask,
@@ -464,8 +532,10 @@ def _generate(
 	"""
 	TODO: Encapsulate wind + rain + temperature into a single ClimateSimulation class
 	Then make climate_effective_latitude_deg (as well as a radians version) a cached property
-	(RIght now, it gets converted to radians in at least 2 differnet places)
+	(RIght now, it gets converted to radians in at least 2 different places)
 	"""
+
+	# TODO: different climate_effective_latitude_deg per season
 
 	# "Effective latitude" for climate simulation
 	# i.e. latitude + noise
@@ -487,37 +557,54 @@ def _generate(
 	- Apply erosion, scaled by precipitation
 	- Recalculate wind & precipitation with new eroded elevation
 	"""
-	# TODO: pass in some noise for domain warping, and use this same noise for wind/temperature/precipitation
-	tprint('Calculating wind')
-	wind_model = WindModel(
-		map_properties=map_properties,
-		terrain=terrain,
-		effective_latitude_deg=climate_effective_latitude_deg,
-	)
-	wind_model.process()
-	prevailing_wind_mps = wind_model.prevailing_wind_mps
 
-	tprint('Calculating temperature')
-	temperature_C = calculate_temperature(
-		effective_latitude_deg=climate_effective_latitude_deg,
-		topography_m=terrain.terrain_m,
-		temperature_noise=temperature_noise,
-		ocean_turbulence_noise=ocean_turbulence_noise,
-		temperature_range_C=temperature_range_C,
-		noise_strength=(0.75*noise_strength),
-	)
+	# Climate, by season
 
-	tprint('Calculating precipitation')
-	precipitation_model = PrecipitationModel(
-		map_properties=map_properties,
-		terrain=terrain,
-		wind=wind_model,
-		effective_latitude_deg=climate_effective_latitude_deg,
-		noise=precipitation_noise,
-	)
-	precipitation_model.process()
-	precipitation_mm = precipitation_model.precipitation_mm
-	base_precipitation_mm = precipitation_model.base_precipitation_mm
+	prevailing_wind_mps = {}
+	temperature_C = {}
+	precipitation_mm_per_year = {}
+	base_precipitation_mm_per_year = {}
+
+	for declination_deg, season in [
+			(0, Season.spring_fall),
+			(params.climate.axial_tilt_degrees, Season.southern_summer),
+			(-params.climate.axial_tilt_degrees, Season.northern_summer)
+			]:
+
+		tprint(f'Calculating wind ({season})')
+		wind_model = WindModel(
+			map_properties=map_properties,
+			terrain=terrain,
+			effective_latitude_deg=climate_effective_latitude_deg,
+			axial_tilt_deg=params.climate.axial_tilt_degrees,
+			declination_deg=declination_deg,
+		)
+		wind_model.process()
+		prevailing_wind_mps[season] = wind_model.prevailing_wind_mps
+
+		tprint(f'Calculating temperature ({season})')
+		temperature_C[season] = calculate_temperature(
+			effective_latitude_deg=climate_effective_latitude_deg,
+			declination_deg=declination_deg,
+			topography_m=terrain.terrain_m,
+			temperature_noise=temperature_noise,
+			ocean_turbulence_noise=ocean_turbulence_noise,
+			temperature_range_C=temperature_range_C,
+			noise_strength=(0.75*noise_strength),
+		)
+
+		tprint(f'Calculating precipitation ({season})')
+		precipitation_model = PrecipitationModel(
+			map_properties=map_properties,
+			terrain=terrain,
+			wind=wind_model,
+			effective_latitude_deg=climate_effective_latitude_deg,
+			declination_deg=declination_deg,
+			noise=precipitation_noise,
+		)
+		precipitation_model.process()
+		precipitation_mm_per_year[season] = precipitation_model.precipitation_mm_per_year
+		base_precipitation_mm_per_year[season] = precipitation_model.base_precipitation_mm_per_year
 
 	tprint('Generating graphs')
 	graph_figure = debug_graph(water_amount=water_amount)
@@ -529,8 +616,8 @@ def _generate(
 		climate_effective_latitude_deg=climate_effective_latitude_deg,
 		temperature_C=temperature_C,
 		prevailing_wind_mps=prevailing_wind_mps,
-		precipitation_mm=precipitation_mm,
-		base_precipitation_mm=base_precipitation_mm,
+		precipitation_mm_per_year=precipitation_mm_per_year,
+		base_precipitation_mm_per_year=base_precipitation_mm_per_year,
 		graph_figure=graph_figure,
 		flat_map=flat_map,
 	)

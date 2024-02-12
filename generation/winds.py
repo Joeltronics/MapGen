@@ -96,7 +96,9 @@ class WindModel:
 			map_properties: MapProperties,
 			terrain: Terrain,
 			effective_latitude_deg: Optional[np.ndarray] = None,
+			declination_deg: float = 0.0,
 			):
+		# TODO: use declination_deg
 
 		self._map_properties = map_properties
 		self._terrain = terrain

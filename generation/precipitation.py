@@ -87,11 +87,13 @@ class PrecipitationModel:
 			terrain: Terrain,
 			wind: WindModel,
 			*,
+			declination_deg: float = 0.0,
 			effective_latitude_deg: Optional[np.ndarray],
 			noise: np.ndarray,
 			noise_strength = 0.25,
 			high_quality = False,
 			):
+		# TODO: use declination_deg
 		self._properties = map_properties
 		self._terrain = terrain
 		self._wind = wind
@@ -104,14 +106,14 @@ class PrecipitationModel:
 		self._precipitation_mm = None
 
 	@property
-	def precipitation_mm(self) -> np.ndarray:
+	def precipitation_mm_per_year(self) -> np.ndarray:
 		if self._precipitation_mm is None:
 			self.process()
 		assert self._precipitation_mm is not None
 		return self._precipitation_mm
 
 	@cached_property
-	def base_precipitation_mm(self):
+	def base_precipitation_mm_per_year(self):
 		return _calculate_base_precipitation(
 			noise=self._noise,
 			latitude_deg=self._effective_latitude_deg,
@@ -278,7 +280,7 @@ class PrecipitationModel:
 		# Base precipitation from latitude
 
 		tprint("Calculating base precipitation")
-		base_precipitation_mm = self.base_precipitation_mm
+		base_precipitation_mm = self.base_precipitation_mm_per_year
 
 		# Orographic precipitation & rain shadows
 
