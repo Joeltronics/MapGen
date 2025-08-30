@@ -168,6 +168,8 @@ def make_planet_generator_tab():
 		with gr.Column():
 			generate_button = gr.Button("Generate")
 
+			# TODO: take default values from the model, don't hard-code them here
+
 			with gr.Box():
 				inputs += [
 					gr.Dropdown(choices=[generator.value for generator in GeneratorType], value=GeneratorType.planet_3d.value, label='Generator'),

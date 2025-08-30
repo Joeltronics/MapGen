@@ -6,6 +6,7 @@ from typing import Final, Optional
 import numpy as np
 import scipy.interpolate
 
+from utils.consts import EARTH_AXIAL_TILT_DEGREES
 from utils.image import resize_array, gaussian_blur_map
 from utils.numeric import data_range, linspace_midpoint, magnitude, rescale, require_same_shape, max_abs
 from utils.utils import tprint
@@ -87,13 +88,14 @@ class PrecipitationModel:
 			terrain: Terrain,
 			wind: WindModel,
 			*,
+			axial_tilt_deg: float = EARTH_AXIAL_TILT_DEGREES,
 			declination_deg: float = 0.0,
 			effective_latitude_deg: Optional[np.ndarray],
 			noise: np.ndarray,
 			noise_strength = 0.25,
 			high_quality = False,
 			):
-		# TODO: use declination_deg
+		# TODO: use axial_tilt_deg & declination_deg
 		self._properties = map_properties
 		self._terrain = terrain
 		self._wind = wind

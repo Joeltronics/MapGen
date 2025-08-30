@@ -15,6 +15,7 @@ import scipy.ndimage
 from .map_properties import MapProperties
 from .topography import Terrain
 
+from utils.consts import EARTH_AXIAL_TILT_DEGREES
 from utils.numeric import rescale, data_range, linspace_midpoint, magnitude, clip_max_vector_magnitude
 from utils.image import \
 	matplotlib_figure_canvas_to_image, resize_array, map_gradient, gaussian_blur_map, divergence, sphere_divergence
@@ -96,9 +97,10 @@ class WindModel:
 			map_properties: MapProperties,
 			terrain: Terrain,
 			effective_latitude_deg: Optional[np.ndarray] = None,
+			axial_tilt_deg: float = EARTH_AXIAL_TILT_DEGREES,
 			declination_deg: float = 0.0,
 			):
-		# TODO: use declination_deg
+		# TODO: use axial_tilt_deg & declination_deg
 
 		self._map_properties = map_properties
 		self._terrain = terrain

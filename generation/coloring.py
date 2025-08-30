@@ -129,6 +129,7 @@ def to_image(
 
 	# TODO: fade over 1-2 degrees (especially on land)
 	# TODO: sea ice cap has no elevation and thus no gradient shading, so add a little bit of noise or something
+	# TODO: make gradient stronger over ice cap?
 	im[np.logical_and(ocean_mask, temperature_C < SEAWATER_FREEZING_POINT_C)] = ICE_CAP
 	im[np.logical_and(land_mask, temperature_C < 0)] = ICE_CAP
 

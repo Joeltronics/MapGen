@@ -16,7 +16,7 @@ from .coloring import to_image, biome_map, BIOME_GRID
 from .fbm import NoiseCoords, fbm, diff_fbm, sphere_fbm, wrapped_fbm, valley_fbm
 from .map_properties import MapProperties
 from .precipitation import PrecipitationModel, latitude_precipitation_fn
-from .temperature import calculate_temperature, DEFAULT_TEMPERATURE_RANGE_C
+from .temperature import calculate_average_annual_temperature, calculate_seasonal_temperature, DEFAULT_TEMPERATURE_RANGE_C
 from .topography import Terrain, get_earth_topography, scale_topography_for_water_level, generate_topography
 from .winds import WindModel, make_prevailing_wind_imgs
 
@@ -283,8 +283,8 @@ class Planet:
 		# if not (topography_m.shape == temperature_C.shape == precipitation_mm_per_year.shape):
 		# 	raise ValueError(f'Arrays do not have the same shape: {topography_m.shape}, {temperature_C.shape}, {precipitation_mm_per_year.shape}')
 
-		if temperature_C.keys() != precipitation_mm_per_year.keys():
-			raise ValueError(f'{temperature_C.keys()=} != {precipitation_mm_per_year.keys()=}')
+		if ({Season.no_season} | temperature_C.keys()) != ({Season.no_season} | precipitation_mm_per_year.keys()):
+			raise ValueError(f'Keys besides no_season must be the same: {temperature_C.keys()=} != {precipitation_mm_per_year.keys()=}')
 
 		if Season.no_season not in temperature_C:
 			temperature_C[Season.no_season] = average_across_seasons(temperature_C)
@@ -455,13 +455,15 @@ def _generate(
 	latitude_range_deg = map_properties.latitude_range
 	latitude_deg_2d = map_properties.latitude_map
 
+	axial_tilt_deg = params.climate.axial_tilt_degrees
+
 	noise_strength = params.noise_strength
 	use_noise = noise_strength > 0
 
 	elevation_steps = params.topography.elevation_steps
 	water_amount = params.topography.water_amount
 	base_frequency = 1.0 / params.topography.continent_size
-	temperature_range_C = (params.climate.pole_C, params.climate.equator_C)
+	equator_C = params.climate.equator_C
 
 	mountain_cell_base_frequency = 1.0 / params.erosion.cell_size
 
@@ -565,10 +567,21 @@ def _generate(
 	precipitation_mm_per_year = {}
 	base_precipitation_mm_per_year = {}
 
+	tprint(f'Calculating annual average temperature')
+	temperature_C[Season.no_season] = calculate_average_annual_temperature(
+		effective_latitude_deg=climate_effective_latitude_deg,
+		topography_m=terrain.terrain_m,
+		temperature_noise=temperature_noise,
+		axial_tilt_deg=axial_tilt_deg,
+		ocean_turbulence_noise=ocean_turbulence_noise,
+		equator_average_temperature_C=equator_C,
+		noise_strength=(0.75*noise_strength),
+	)
+
 	for declination_deg, season in [
 			(0, Season.spring_fall),
-			(params.climate.axial_tilt_degrees, Season.southern_summer),
-			(-params.climate.axial_tilt_degrees, Season.northern_summer)
+			(axial_tilt_deg, Season.southern_summer),
+			(-axial_tilt_deg, Season.northern_summer)
 			]:
 
 		tprint(f'Calculating wind ({season})')
@@ -576,20 +589,22 @@ def _generate(
 			map_properties=map_properties,
 			terrain=terrain,
 			effective_latitude_deg=climate_effective_latitude_deg,
-			axial_tilt_deg=params.climate.axial_tilt_degrees,
+			axial_tilt_deg=axial_tilt_deg,
 			declination_deg=declination_deg,
 		)
 		wind_model.process()
 		prevailing_wind_mps[season] = wind_model.prevailing_wind_mps
 
 		tprint(f'Calculating temperature ({season})')
-		temperature_C[season] = calculate_temperature(
+		assert temperature_C.get(Season.no_season, None) is not None
+		temperature_C[season] = calculate_seasonal_temperature(
+			annual_average_temperature=temperature_C[Season.no_season],
 			effective_latitude_deg=climate_effective_latitude_deg,
 			declination_deg=declination_deg,
 			topography_m=terrain.terrain_m,
 			temperature_noise=temperature_noise,
 			ocean_turbulence_noise=ocean_turbulence_noise,
-			temperature_range_C=temperature_range_C,
+			equator_average_temperature_C=equator_C,
 			noise_strength=(0.75*noise_strength),
 		)
 
